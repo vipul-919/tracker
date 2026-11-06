@@ -2,10 +2,12 @@ import mongoose from 'mongoose';
 const { Schema } = mongoose;
 const workspace = { workspaceId: { type: Schema.Types.ObjectId, ref: 'User', index: true } };
 const owned = { ...workspace, userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true } };
-const opts = { timestamps: true, toJSON: { transform(_doc, ret) { ret.id = String(ret._id); if (ret.websiteId) ret.websiteId = String(ret.websiteId); if (ret.userId) ret.userId = String(ret.userId); delete ret._id; delete ret.__v; delete ret.passwordHash; delete ret.resetCodeHash; delete ret.resetCodeExpiry; delete ret.resetAttempts; delete ret.resetRequestCount; delete ret.resetRequestWindowStart; delete ret.sessionVersion; return ret; } } };
+const opts = { timestamps: true, toJSON: { transform(_doc, ret) { ret.id = String(ret._id); if (ret.websiteId) ret.websiteId = String(ret.websiteId); if (ret.userId) ret.userId = String(ret.userId); delete ret._id; delete ret.__v; delete ret.tokenHash; delete ret.passwordHash; delete ret.resetCodeHash; delete ret.resetCodeExpiry; delete ret.resetAttempts; delete ret.resetRequestCount; delete ret.resetRequestWindowStart; delete ret.sessionVersion; return ret; } } };
 const roles = ['admin', 'editor', 'viewer'];
 const userSchema = new Schema({
   ...workspace,
+  workspaceMigrationVersion: { type: Number, default: 0 },
+  lastWorkspaceId: { type: Schema.Types.ObjectId },
 	name: { type: String, required: true, trim: true, maxlength: 100 },
 	email: { type: String, unique: true, required: true, lowercase: true, trim: true, maxlength: 254 },
 	username: { type: String, unique: true, sparse: true, lowercase: true, trim: true, maxlength: 40 },
@@ -46,3 +48,34 @@ export const Website = mongoose.model('Website', websiteSchema);
 export const MonthlyAllocation = mongoose.model('MonthlyAllocation', allocationSchema);
 export const WorkLog = mongoose.model('WorkLog', workLogSchema);
 export const AuditLog = mongoose.model('AuditLog', auditLogSchema);
+
+const workspaceSchema = new Schema({
+  name: { type: String, required: true, trim: true, maxlength: 100 },
+  ownerId: { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
+}, opts);
+const membershipSchema = new Schema({
+  workspaceId: { type: Schema.Types.ObjectId, ref: 'Workspace', required: true, index: true },
+  userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
+  role: { type: String, enum: ['owner', 'editor', 'viewer'], required: true },
+  status: { type: String, enum: ['active', 'inactive'], default: 'active' },
+  joinedAt: { type: Date, default: Date.now },
+  lastActive: Date,
+}, opts);
+membershipSchema.index({ workspaceId: 1, userId: 1 }, { unique: true });
+const invitationSchema = new Schema({
+  workspaceId: { type: Schema.Types.ObjectId, ref: 'Workspace', required: true, index: true },
+  name: { type: String, trim: true, maxlength: 100, required: true },
+  email: { type: String, lowercase: true, trim: true, required: true },
+  invitedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
+  assignedRole: { type: String, enum: ['editor', 'viewer'], required: true },
+  tokenHash: { type: String, required: true, select: false },
+  status: { type: String, enum: ['pending', 'accepted', 'rejected', 'cancelled', 'expired'], default: 'pending' },
+  expiresAt: { type: Date, required: true },
+  deliveryStatus: { type: String, enum: ['sent', 'failed', 'sending'], default: 'sending' },
+  acceptedBy: { type: Schema.Types.ObjectId, ref: 'User' },
+}, { ...opts, optimisticConcurrency: true });
+invitationSchema.index({ workspaceId: 1, email: 1 }, { unique: true, partialFilterExpression: { status: 'pending' } });
+invitationSchema.index({ tokenHash: 1 }, { unique: true });
+export const Workspace = mongoose.model('Workspace', workspaceSchema);
+export const Membership = mongoose.model('Membership', membershipSchema);
+export const WorkspaceInvitation = mongoose.model('WorkspaceInvitation', invitationSchema);

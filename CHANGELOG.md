@@ -36,3 +36,13 @@ See PROJECT_STATUS.md for remaining scope, dependencies, and acceptance requirem
 - Adds a server-token-verified website flow to upgrade the logged-in original account without recreating credentials, plus an operator dry-run/apply helper. The live owner account has not been modified.
 - Adds isolated tests for owner claim, manual account creation, failed invitations, username login, cross-workspace API/export isolation, owner protections, reset invalidation and recovery concurrency.
 - Validation: all 19 Node tests pass; production build passes; browser checks pass, including manual creation, Copy Credentials, dismissal and role filtering. Lint remains unavailable because the project has no lint script. The configured local database dry run failed to connect and made no changes.
+
+## 2026-11-06 - Collaborative multi-workspace system
+
+- Replaces the single global owner model with independent personal workspaces and per-workspace Owner/Editor/Viewer memberships.
+- Adds self-registration, hashed seven-day invitation links for existing/new identities, acceptance/rejection, resend/cancellation and honest failed-delivery feedback. Owners cannot reset/delete another global account.
+- Adds a workspace switcher, persisted selection, scoped request/download headers, workspace naming and member controls. Clears state and ignores stale data across switches.
+- Preserves existing IDs and explicit ownership fields, migrates historical child data via websites, and adds dry-run/backup-before-apply bulk migration. Retires bootstrap-token/manual account creation workflows.
+- Retains website/log/allocation/report/export behavior, CSV/Excel protections, session invalidation and password recovery. Adds compatibility for legacy missing account status/session-version fields.
+- Browser verification caught and fixed invitation links opened in an already-running tab; hash changes now update the invitation panel.
+- Final verification: all 25 Node tests pass, production build passes, and browser checks pass registration/invitations/reciprocal sharing/switching/stale-response isolation/CRUD/exports/theme/mobile. Git whitespace and Node syntax checks pass. Lint was attempted but has no configured script. The local database preview could not connect; no live migration was applied. Real SMTP and private production data remain unverified.

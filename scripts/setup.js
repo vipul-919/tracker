@@ -4,7 +4,6 @@ const defaults = {
   PORT: '3001',
   MONGODB_URI: 'mongodb://127.0.0.1:27017/work-hours-tracker',
   JWT_SECRET: randomBytes(48).toString('hex'),
-  ADMIN_BOOTSTRAP_TOKEN: randomBytes(48).toString('hex'),
   APP_URL: 'http://127.0.0.1:5173',
   NODE_ENV: 'development',
   SMTP_HOST: '',
@@ -16,7 +15,7 @@ const defaults = {
 };
 if (!existsSync('.env')) {
   writeFileSync('.env', `${Object.entries(defaults).map(([key, value]) => `${key}=${value}`).join('\n')}\n`, { mode: 0o600 });
-  console.log('Created .env with unique session and owner-bootstrap secrets. Configure SMTP for invitations and recovery email.');
+  console.log('Created .env with unique session secret. Configure SMTP for invitations and recovery email.');
 } else {
   const existing = readFileSync('.env', 'utf8');
   const present = new Set([...existing.matchAll(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/gm)].map(match => match[1]));

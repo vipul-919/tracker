@@ -11,7 +11,21 @@ const header = ['X-Requested-With', 'Tempo'];
 const website = { name: 'Test website', url: 'https://example.com', description: 'Testing', defaultMonthlyHours: 12, startDate: '2026-01-01', status: 'Active' };
 const emailMessages = [];
 const bootstrapToken = 'test-owner-bootstrap-token-longer-than-32-characters';
-before(async () => { mongo = await MongoMemoryServer.create({ binary: { downloadDir: '.data/mongodb-binaries' } }); await mongoose.connect(mongo.getUri()); app = createApp({ secret: 'testing-secret-that-is-longer-than-32-characters', bootstrapToken, sendMail: async message => emailMessages.push(message) }); owner = request.agent(app); editor = request.agent(app); other = request.agent(app); }, { timeout: 240000 });
+before(async () => {
+  mongo = await MongoMemoryServer.create({ binary: { downloadDir: '.data/mongodb-binaries' } });
+  await mongoose.connect(mongo.getUri());
+  app = createApp({ secret: 'testing-secret-that-is-longer-than-32-characters', sendMail: async message => emailMessages.push(message), appUrl: 'https://tempo.test' });
+  owner = request.agent(app); editor = request.agent(app); other = request.agent(app);
+  const own = await owner.post('/api/auth/register').set(...header).send({ name: 'Owner', email: 'owner@example.com', password: 'strong-owner-password' }).expect(200);
+  await editor.post('/api/auth/register').set(...header).send({ name: 'Editor', email: 'editor@example.com', password: 'Editor-Changed-Password-2' }).expect(200);
+  await other.post('/api/auth/register').set(...header).send({ name: 'Viewer', email: 'viewer@example.com', password: 'Viewer-Changed-Password-2' }).expect(200);
+  for (const [agent, email, role] of [[editor, 'editor@example.com', 'editor'], [other, 'viewer@example.com', 'viewer']]) {
+    await owner.post('/api/workspace-invitations').set(...header).send({ name: role, email, role }).expect(201);
+    const token = emailMessages.at(-1).text.match(/invitation=([A-Za-z0-9_-]+)/)[1];
+    await agent.post('/api/invitations/accept').set(...header).send({ token }).expect(200);
+    agent.set('X-Workspace-Id', own.body.workspaceId);
+  }
+}, { timeout: 240000 });
 after(async () => { await mongoose.disconnect(); await mongo?.stop(); });
 test('legacy user documents receive safe role defaults without serializing secrets', () => {
   const legacy = User.hydrate({ _id: new mongoose.Types.ObjectId(), name: 'Legacy user', email: 'legacy@example.com', passwordHash: 'stored-hash' });
@@ -25,87 +39,10 @@ test('legacy user documents receive safe role defaults without serializing secre
   assert.equal(json.sessionVersion, undefined);
 });
 
-test('primary-owner bootstrap, shared workspace roles, user management and recovery', async () => {
-  await request(app).get('/api/auth/setup-status').expect(200).expect(({ body }) => { assert.equal(body.needsOwner, true); assert.equal(body.bootstrapEnabled, true); });
-  await owner.post('/api/auth/register').set(...header).send({ name: 'Public', email: 'public@example.com', password: 'strong-public-password' }).expect(403);
-  await owner.post('/api/auth/bootstrap').set(...header).set('X-Admin-Bootstrap-Token', 'wrong-token').send({ name: 'Owner', email: 'owner@example.com', password: 'strong-owner-password' }).expect(403);
-  const bootstrapped = await owner.post('/api/auth/bootstrap').set(...header).set('X-Admin-Bootstrap-Token', bootstrapToken).send({ name: 'Owner', email: 'owner@example.com', password: 'strong-owner-password' }).expect(200);
-  assert.equal(bootstrapped.body.role, 'admin'); assert.equal(bootstrapped.body.isPrimaryAdmin, true); assert.equal(bootstrapped.body.passwordHash, undefined);
-  assert.match(bootstrapped.headers['set-cookie'][0], /HttpOnly/); assert.match(bootstrapped.headers['set-cookie'][0], /SameSite=Strict/);
-  await request(app).post('/api/auth/bootstrap').set(...header).set('X-Admin-Bootstrap-Token', bootstrapToken).send({ name: 'Intruder', email: 'intruder@example.com', password: 'strong-intruder-password' }).expect(409);
-
-  const editorUser = (await owner.post('/api/users').set(...header).send({ name: 'Editor User', email: 'editor@example.com', username: 'editor-user', password: 'Temporary-Editor-Password-1', role: 'editor', status: 'active', sendInvitation: true }).expect(201)).body;
-  const viewerUser = (await owner.post('/api/users').set(...header).send({ name: 'Viewer User', email: 'viewer@example.com', password: 'Temporary-Viewer-Password-1', role: 'viewer', status: 'active', sendInvitation: true }).expect(201)).body;
-  assert.equal(editorUser.mustChangePassword, true); assert.equal(editorUser.passwordHash, undefined); assert.equal(emailMessages.length, 2);
-  await owner.post('/api/users').set(...header).send({ name: 'Duplicate', email: 'EDITOR@example.com', password: 'Temporary-Other-Password-1', role: 'viewer', status: 'active', sendInvitation: true }).expect(409);
-  await owner.get('/api/users').expect(200).expect(({ body }) => { assert.equal(body.length, 3); assert.ok(body.every(user => user.passwordHash === undefined && user.resetCodeHash === undefined)); });
-  await editor.post('/api/auth/login').set(...header).send({ email: editorUser.email, password: 'Temporary-Editor-Password-1' }).expect(200).expect(({ body }) => assert.equal(body.mustChangePassword, true));
-  await editor.get('/api/data').expect(403);
-  await editor.post('/api/auth/change-password').set(...header).send({ newPassword: 'Editor-Changed-Password-2' }).expect(200);
-  await other.post('/api/auth/login').set(...header).send({ email: viewerUser.email, password: 'Temporary-Viewer-Password-1' }).expect(200);
-  await other.post('/api/auth/change-password').set(...header).send({ newPassword: 'Viewer-Changed-Password-2' }).expect(200);
-  await editor.get('/api/users').expect(403); await editor.get('/api/audit-logs').expect(403); await editor.get('/api/backup').expect(403);
-  await other.get('/api/users').expect(403); await other.get('/api/audit-logs').expect(403); await other.get('/api/backup').expect(403);
-
-  websiteId = (await editor.post('/api/websites').set(...header).send(website).expect(201)).body.id;
-  await other.get('/api/data').expect(200).expect(({ body }) => assert.equal(body.websites[0].id, websiteId));
-  await other.post('/api/websites').set(...header).send({ ...website, name: 'Viewer write attempt' }).expect(403);
-  await other.put(`/api/websites/${websiteId}`).set(...header).send({ ...website, name: 'Viewer edit attempt' }).expect(403);
-  await other.delete(`/api/websites/${websiteId}`).set(...header).expect(403);
-  const entry = { websiteId, date: '2026-11-05', description: 'Shared work', category: 'Development', hours: 2, minutes: 30, notes: 'Shared note' };
-  const created = await editor.post('/api/logs').set(...header).send(entry).expect(201); logId = created.body.id;
-  await other.post('/api/logs').set(...header).send(entry).expect(403);
-  await other.put(`/api/logs/${logId}`).set(...header).send({ ...entry, hours: 3 }).expect(403);
-  await other.delete(`/api/logs/${logId}`).set(...header).expect(403);
-  allocationId = (await editor.put('/api/allocations').set(...header).send({ websiteId, year: 2026, month: 11, allocatedHours: 8 }).expect(200)).body.id;
-  await other.put('/api/allocations').set(...header).send({ websiteId, year: 2026, month: 11, allocatedHours: 99 }).expect(403);
-  await other.delete(`/api/allocations/${allocationId}`).set(...header).expect(403);
-  await other.get(`/api/websites/${websiteId}/export/csv`).expect(200);
-  await editor.put(`/api/websites/${websiteId}`).set(...header).send({ ...website, name: 'Editor update' }).expect(200);
-  await owner.put(`/api/users/${editorUser.id}`).set(...header).send({ role: 'viewer' }).expect(200);
-  await editor.post('/api/websites').set(...header).send({ ...website, name: 'Role change denied' }).expect(403);
-  await owner.put(`/api/users/${editorUser.id}`).set(...header).send({ role: 'editor' }).expect(200);
-  await owner.put(`/api/users/${bootstrapped.body.id}`).set(...header).send({ role: 'viewer' }).expect(403);
-  await owner.put(`/api/users/${bootstrapped.body.id}`).set(...header).send({ status: 'inactive' }).expect(403);
-  await owner.delete(`/api/users/${bootstrapped.body.id}`).set(...header).expect(403);
-  await owner.get('/api/audit-logs').expect(200).expect(({ body }) => assert.ok(body.some(log => log.action === 'worklog.created')));
-
-  const genericUnknown = await request(app).post('/api/auth/forgot-password').set(...header).send({ email: 'unknown@example.com' }).expect(200);
-  await request(app).post('/api/auth/forgot-password').set(...header).send({ email: 'editor@example.com' }).expect(200).expect(({ body }) => assert.deepEqual(body, genericUnknown.body));
-  const firstCode = emailMessages.at(-1).text.match(/\b\d{8}\b/)[0];
-  await request(app).post('/api/auth/forgot-password').set(...header).send({ email: 'editor@example.com' }).expect(200);
-  const secondCode = emailMessages.at(-1).text.match(/\b\d{8}\b/)[0];
-  await request(app).post('/api/auth/reset-password').set(...header).send({ email: 'editor@example.com', code: firstCode, password: 'Recovered-Password-3' }).expect(400);
-  const recovered = await request(app).post('/api/auth/reset-password').set(...header).send({ email: 'editor@example.com', code: secondCode, password: 'Recovered-Password-3' });
-  assert.equal(recovered.status, 200, JSON.stringify(recovered.body));
-  await editor.get('/api/data').expect(401);
-  await request(app).post('/api/auth/reset-password').set(...header).send({ email: 'editor@example.com', code: secondCode, password: 'Reused-Code-Password-4' }).expect(400);
-  await editor.post('/api/auth/login').set(...header).send({ email: 'editor@example.com', password: 'Recovered-Password-3' }).expect(200);
-  const expiredUser = await User.findOne({ email: 'editor@example.com' }).select('+resetCodeHash +resetCodeExpiry');
-  expiredUser.resetCodeHash = 'a'.repeat(64); expiredUser.resetCodeExpiry = new Date(Date.now() - 1000); await expiredUser.save();
-  await request(app).post('/api/auth/reset-password').set(...header).send({ email: 'editor@example.com', code: '12345678', password: 'Expired-Code-Password-4' }).expect(400);
-
-  await owner.put(`/api/users/${viewerUser.id}`).set(...header).send({ status: 'inactive' }).expect(200);
-  await other.get('/api/data').expect(401);
-  await owner.put(`/api/users/${viewerUser.id}`).set(...header).send({ status: 'active' }).expect(200);
-  await other.post('/api/auth/login').set(...header).send({ email: 'viewer@example.com', password: 'Viewer-Changed-Password-2' }).expect(200);
-  await owner.post(`/api/users/${viewerUser.id}/reset-password`).set(...header).expect(200);
-  const temporaryPassword = emailMessages.at(-1).text.match(/Temporary password: ([^\n]+)/)[1];
-  await other.get('/api/data').expect(401);
-  await other.post('/api/auth/login').set(...header).send({ email: 'viewer@example.com', password: temporaryPassword }).expect(200).expect(({ body }) => assert.equal(body.mustChangePassword, true));
-  await other.post('/api/auth/change-password').set(...header).send({ newPassword: 'Viewer-Reset-Password-3' }).expect(200);
-  const disposable = (await owner.post('/api/users').set(...header).send({ name: 'Disposable', email: 'disposable@example.com', password: 'Temporary-Disposable-Password-1', role: 'viewer', status: 'active', sendInvitation: true }).expect(201)).body;
-  await owner.delete(`/api/users/${disposable.id}`).set(...header).expect(200);
-  await request(app).post('/api/auth/login').set(...header).send({ email: 'disposable@example.com', password: 'Temporary-Disposable-Password-1' }).expect(401);
-  await editor.delete(`/api/websites/${websiteId}`).set(...header).expect(200);
-  assert.ok(emailMessages.some(message => message.subject.includes('recovery code')));
-  assert.ok(emailMessages.some(message => message.subject.includes('password was changed')));
-});
-
 test('authentication, validation, authorization and complete CRUD with real MongoDB', async () => {
   await request(app).get('/api/data').expect(401);
-  await request(app).post('/api/auth/register').set(...header).send({ name: 'Public', email: 'public@example.com', password: 'strong-public-password' }).expect(403);
-  await owner.get('/api/auth/me').expect(200).expect(({ body }) => { assert.equal(body.role, 'admin'); assert.equal(body.passwordHash, undefined); });
+  await request(app).post('/api/auth/register').set(...header).send({ name: 'Duplicate', email: 'owner@example.com', password: 'strong-public-password' }).expect(409);
+  await owner.get('/api/auth/me').expect(200).expect(({ body }) => { assert.equal(body.role, 'owner'); assert.equal(body.passwordHash, undefined); });
   await owner.post('/api/websites').set(...header).send({ ...website, url: 'javascript:alert(1)' }).expect(400);
   websiteId = (await editor.post('/api/websites').set(...header).send(website).expect(201)).body.id;
   const entry = { websiteId, date: '2026-11-05', description: '=Formula injection test', category: 'Development', hours: 2, minutes: 30, notes: 'A real work entry' };
@@ -134,7 +71,7 @@ test('authentication, validation, authorization and complete CRUD with real Mong
   const empty = (await owner.get('/api/data')).body; assert.equal(empty.websites.length, 0); assert.equal(empty.logs.length, 0); assert.equal(empty.allocations.length, 0);
   await editor.post('/api/auth/logout').set(...header).expect(200); await editor.get('/api/data').expect(401);
   await editor.post('/api/auth/login').set(...header).send({ email: 'editor@example.com', password: 'wrong-password' }).expect(401);
-  await editor.post('/api/auth/login').set(...header).send({ email: 'editor@example.com', password: 'Recovered-Password-3' }).expect(200);
+  await editor.post('/api/auth/login').set(...header).send({ email: 'editor@example.com', password: 'Editor-Changed-Password-2' }).expect(200);
 });
 
 test('individual and combined exports include complete historical work history', async () => {

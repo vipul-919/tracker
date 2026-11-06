@@ -1,15 +1,16 @@
-# Development instructions
+﻿# Development instructions
 
-This is the existing Tempo Website Work Hours Tracker. Preserve its React/Vite, Express, MongoDB, and ExcelJS stack, visual design, features, and shared-workspace semantics. Scope all data and user queries to the authenticated workspace. Never infer ownership from a login or a client-supplied email.
+This is Tempo, an existing React/Vite + Express + MongoDB work-hours tracker. Preserve its design, integer-minute calculations, calendar dates, reports and exports.
 
-- Read PROJECT_STATUS.md and PROJECT_ARCHITECTURE.md before changes. Inspect Git status and preserve all existing work. Use a separate branch for substantial changes; do not commit without a request.
-- Never display or commit `.env` values, connection strings, passwords, session cookies, bootstrap tokens, or SMTP credentials. `.env.example` contains placeholders only.
-- Never delete application database records, reset a database, run destructive migrations, or change production configuration without explicit authorization. Existing automated tests use throwaway MongoDB instances and may perform CRUD there.
-- Use integer minutes for calculations and validated YYYY-MM-DD strings for work dates. Preserve monthly zero overrides and historical/inactive website exports.
-- Only the original workspace owner (isPrimaryAdmin, stored internally with role admin) manages users, roles, audit logs, backups, and settings. New users may be Editor or Viewer only. Editors manage workspace data. Viewers read and export only. Enforce permissions in APIs and UI. The primary Admin is protected against deletion, deactivation, downgrade, and edits by another Admin.
-- Authentication uses HttpOnly cookies, versioned sessions, bcrypt hashes, forced first-login password change, and single-use expiring recovery codes. Preserve invalidation when passwords or account status change. Logout currently invalidates all sessions for the account.
-- Reuse `createApp` for local and Vercel entry points. Never put secrets in VITE_ variables. Do not use a localhost MongoDB URI on Vercel.
-- Run `npm.cmd test`, `npm.cmd run build`, and relevant `npm.cmd run test:browser` checks. Use npm on other shells. Browser checks need installed Chrome/Edge and a built dist directory. MongoDB binaries are cached under ignored `.data`.
-- No lint configuration currently exists. Do not report lint as passing; Node syntax checks and a Vite build are separate checks.
-- This Windows installation has Git at `C:/Program Files/Git/cmd/git.exe`; it may not be on PATH. Vite/esbuild may need sandbox escalation to read parent directories. An environment access failure is not evidence of an application defect.
-- Do not infer production readiness from isolated tests. Atlas connection, SMTP delivery, owner setup, and Vercel deployment must be verified separately. Keep status and deployment documentation consistent with observed evidence.
+- Read PROJECT_STATUS.md and PROJECT_ARCHITECTURE.md. Inspect Git status; preserve existing work and use an isolated branch for substantial changes. Commit/deploy only with user authorization.
+- The current model is collaborative multi-workspace. Every account owns a personal workspace. Owner/Editor/Viewer roles come from Membership, never the legacy User.role or isPrimaryAdmin fields. A user's role in one workspace has no effect elsewhere.
+- Authenticate identity, verify workspace and active membership, then enforce membership role and record workspaceId on every workspace API. Owners alone manage members/settings/audits/backups. Editors write project data; Viewers read/export. Invitation acceptance is a separate recipient-and-token-verified grant.
+- Personal workspace IDs reuse User IDs for backward compatibility. Existing explicit workspaceIds are preserved. The repeatable legacy migration stamps missing website fields and links logs/allocations through their website. Preserve recorded legacy shared access; do not infer new memberships from an email or global Admin flag.
+- Do not delete application records, reset a database, run destructive migrations or change production configuration without explicit authorization. Automated tests use isolated MongoDB instances and may CRUD there. The bulk migration defaults to read-only and backs up before explicit --apply.
+- Never print/commit env values, connection strings, passwords, cookies or invitation/recovery tokens. Only hashes persist for tokens. Invitation links use a URL fragment and authenticated POST redemption. Failed SMTP must not grant membership or fabricate successful delivery.
+- Keep account identities independent. Workspace owners cannot reset another account's password, delete it, or modify its other memberships. Removing/deactivating a member affects only that workspace. Existing temporary accounts still must change password at first login.
+- The frontend sends X-Workspace-Id on JSON requests and downloads. Validate it server-side. Clear workspace state and invalidate in-flight data responses on switch; retain per-tab context and persist the last selection on the account.
+- Keep shared createApp local/Vercel entry points. No VITE_ secrets or localhost production database. ADMIN_BOOTSTRAP_TOKEN is obsolete; personal ownership needs no token.
+- Run npm.cmd test, npm.cmd run build, and relevant npm.cmd run test:browser. Use npm on other shells. Browser tests require installed Chrome/Edge; Mongo binaries/screenshots/backups live under ignored .data. No lint script exists; report that honestly.
+- Windows Git may require C:/Program Files/Git/cmd/git.exe. Vite/esbuild may require sandbox escalation for parent-directory reads. Do not confuse access restrictions with application defects.
+- Isolated tests do not verify production Atlas, live SMTP delivery or deployed account/data migration. Record actual results and remaining configuration requirements in the project documents.

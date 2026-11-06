@@ -30,21 +30,16 @@ test('Vercel entry point serves original API paths, secure login, and warm reque
   unconfigured.use(unconfiguredHandler);
   await request(unconfigured).get('/api/auth/setup-status').expect(503);
   await request(app).get('/api/data').expect(401);
-  await request(app).post('/api/auth/register')
+  const registered = await request(app).post('/api/auth/register')
     .set('X-Requested-With', 'Tempo')
     .send({ name: 'Hosted user', email: 'hosted@example.com', password: 'strong-hosting-password' })
-    .expect(403);
-  const registered = await request(app).post('/api/auth/bootstrap')
-    .set('X-Requested-With', 'Tempo')
-    .set('X-Admin-Bootstrap-Token', process.env.ADMIN_BOOTSTRAP_TOKEN)
-    .send({ name: 'Hosted owner', email: 'hosted@example.com', password: 'strong-hosting-password' })
     .expect(200);
   const cookie = registered.headers['set-cookie'][0];
   assert.match(cookie, /; Secure/);
   assert.match(cookie, /; HttpOnly/);
   assert.match(cookie, /; SameSite=Strict/);
   const session = cookie.split(';')[0];
-  assert.equal(registered.body.isPrimaryAdmin, true);
+  assert.equal(registered.body.role, 'owner');
   const initialConnection = mongoose.connection;
   for (let i = 0; i < 3; i++) {
     const result = await request(app).get('/api/auth/me').set('Cookie', session).expect(200);

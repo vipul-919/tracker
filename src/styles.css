@@ -14,3 +14,5 @@
 .account-password-form{padding:0}
 
 .credentials-card{padding:24px;margin-bottom:22px}.credentials-card>p{margin:12px 0}.credentials-card dl{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;margin:20px 0;font-size:12px}.credentials-card dd{margin:0;overflow-wrap:anywhere}.credentials-card dt{color:var(--muted)}.credentials-card .button{margin:4px}.invitation-option{flex-direction:row!important;align-items:center}.invitation-option input{width:auto!important}.owner-setup{margin-bottom:20px}
+
+.workspace-switcher{min-width:0}.workspace-switcher>div{min-width:0;flex:1}.workspace-switcher select{width:100%;min-width:0;font-size:11px;padding:6px 2px;border:0;background:transparent;overflow:hidden;text-overflow:ellipsis}.workspace-switcher small{display:block}.invitation-form{margin:20px 0;max-width:520px}.invitation-panel{margin-bottom:20px}.workspace-name-form{padding:16px 0}.role-owner{background:var(--soft);color:var(--green)}.user-notice{margin-bottom:16px}

@@ -1,18 +1,20 @@
 import express from 'express';
+import { workspaceContext, accountPayload, ensurePersonalWorkspace, installWorkspaceRoutes } from './workspaces.js';
 import helmet from 'helmet';
 import cookieParser from 'cookie-parser';
 import rateLimit from 'express-rate-limit';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import ExcelJS from 'exceljs';
-import { createHash, randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
+import { createHash, randomInt, timingSafeEqual } from 'node:crypto';
 import { User, Website, WorkLog, MonthlyAllocation, AuditLog } from './models.js';
-import { websiteInput, logInput, allocationInput, credentials, bootstrapInput, managedUserInput, managedUserUpdateInput, passwordChangeInput, forgotPasswordInput, resetPasswordInput, id, date } from './validation.js';
+import { websiteInput, logInput, allocationInput, credentials, bootstrapInput, passwordChangeInput, forgotPasswordInput, resetPasswordInput, id, date } from './validation.js';
 import { reportRows, csvCell, duration } from '../shared/tracking.js';
-import { sendConfiguredEmail, invitationEmail, temporaryPasswordEmail, recoveryEmail, passwordChangedEmail, deactivationEmail } from './email.js';
+import { sendConfiguredEmail, recoveryEmail, passwordChangedEmail } from './email.js';
 
 const EXPORT_HEADERS = ['Date', 'Website Name', 'Website URL', 'Work Description', 'Work Category', 'Hours', 'Minutes', 'Total Time', 'Notes', 'Created At'];
 const EXPORT_WIDTHS = [14, 26, 34, 48, 20, 10, 10, 18, 42, 26];
+const activeAccount = { $or: [{ status: 'active' }, { status: { $exists: false } }] };
 
 function exportRows(logs, websites) {
   const byId = new Map(websites.map(website => [String(website._id), website]));
@@ -79,7 +81,7 @@ function createCombinedWorkbook(websites, logs, logsByWebsite) {
   addExportWorksheet(workbook, 'All Work Logs', exportRows(logs, websites), used);
   return workbook;
 }
-export function createApp({ secret, production = false, bootstrapToken = process.env.ADMIN_BOOTSTRAP_TOKEN, sendMail = sendConfiguredEmail, appUrl = process.env.APP_URL || '' } = {}) {
+export function createApp({ secret, production = false, sendMail = sendConfiguredEmail, appUrl = process.env.APP_URL || '' } = {}) {
   if (!secret || secret.length < 32) throw new Error('JWT_SECRET must contain at least 32 characters');
   const app = express();
   app.use(helmet({ contentSecurityPolicy: production ? undefined : false }));
@@ -89,38 +91,22 @@ export function createApp({ secret, production = false, bootstrapToken = process
     next();
   });
   const cookie = { httpOnly: true, secure: production, sameSite: 'strict', maxAge: 7 * 86400000, path: '/' };
-  const signIn = async (res, user) => { user.lastLogin = new Date(); await user.save(); res.cookie('tempo_session', jwt.sign({ sub: String(user._id), sv: user.sessionVersion || 0 }, secret, { expiresIn: '7d', algorithm: 'HS256' }), cookie); return res.json(user); };
+  const signIn = async (res, user) => { user.lastLogin = new Date(); await user.save(); res.cookie('tempo_session', jwt.sign({ sub: String(user._id), sv: user.sessionVersion || 0 }, secret, { expiresIn: '7d', algorithm: 'HS256' }), cookie); return res.json(accountPayload(user, await workspaceContext(user))); };
   const limiter = rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many attempts. Please try again in 15 minutes.' } });
   const resetRequestLimiter = rateLimit({ windowMs: 15 * 60000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'If an active account matches that email, a recovery code will be sent.' } });
   const resetVerifyLimiter = rateLimit({ windowMs: 15 * 60000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'The recovery code is invalid or expired.' } });
-  const ownerOnly = (req, res, next) => req.user?.isPrimaryAdmin && String(req.user._id) === String(req.workspaceId) ? next() : res.status(403).json({ error: 'Only the workspace owner can manage users, backups and audit logs.' });
-  const requireRoles = (...roles) => (req, res, next) => roles.includes(req.user?.role) ? next() : res.status(403).json({ error: 'Your role does not allow this action.' });
-  const audit = async (req, action, resourceType, resourceId = '', details = {}) => AuditLog.create({ workspaceId: req.workspaceId, userId: req.user._id, userName: req.user.name, userRole: req.user.role, action, resourceType, resourceId: resourceId ? String(resourceId) : '', details });
+  const ownerOnly = (req, res, next) => req.membership?.role === 'owner' && String(req.user._id) === String(req.workspace.ownerId) ? next() : res.status(403).json({ error: 'Only the workspace owner can manage users, backups and audit logs.' });
+  const requireRoles = (...roles) => (req, res, next) => roles.includes(req.membership?.role) || (req.membership?.role === 'owner' && roles.includes('admin')) ? next() : res.status(403).json({ error: 'Your role does not allow this action.' });
+  const audit = async (req, action, resourceType, resourceId = '', details = {}) => AuditLog.create({ workspaceId: req.workspaceId, userId: req.user._id, userName: req.user.name, userRole: req.membership?.role === 'owner' ? 'admin' : req.membership.role, action, resourceType, resourceId: resourceId ? String(resourceId) : '', details });
   const invalidReset = res => res.status(400).json({ error: 'The recovery code is invalid or expired.' });
-  app.get('/api/auth/setup-status', async (_req, res) => res.json({ needsOwner: !(await User.exists({ isPrimaryAdmin: true })), bootstrapEnabled: Boolean(bootstrapToken) }));
-  app.post('/api/auth/register', limiter, (_req, res) => res.status(403).json({ error: 'Public registration is disabled. Ask your Admin to create an account.' }));
-  app.post('/api/auth/bootstrap', limiter, async (req, res) => {
-    if (!bootstrapToken) return res.status(503).json({ error: 'Owner setup is not enabled. Configure ADMIN_BOOTSTRAP_TOKEN first.' });
-    const supplied = Buffer.from(req.get('X-Admin-Bootstrap-Token') || '');
-    const expected = Buffer.from(bootstrapToken);
-    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return res.status(403).json({ error: 'Owner setup token is invalid.' });
-    if (await User.exists({ isPrimaryAdmin: true })) return res.status(409).json({ error: 'The primary Admin account is already set up.' });
+  app.get('/api/auth/setup-status', async (_req, res) => res.json({ registrationEnabled: true, needsOwner: false, bootstrapEnabled: false }));
+  app.post('/api/auth/register', limiter, async (req, res) => {
     const value = bootstrapInput.parse(req.body);
-    let user = await User.findOne({ email: value.email }).select('+passwordHash +sessionVersion');
-    if (user?.isPrimaryAdmin) return res.status(409).json({ error: 'The primary Admin account is already set up.' });
-    if (!user) user = new User({ email: value.email });
-    user.name = value.name;
-    user.passwordHash = await bcrypt.hash(value.password, 12);
-    user.role = 'admin';
-    user.status = 'active';
-    user.isPrimaryAdmin = true;
-    user.workspaceId = user._id;
-    user.mustChangePassword = false;
-    user.sessionVersion = (user.sessionVersion || 0) + 1;
-    await user.save();
-    await AuditLog.create({ workspaceId: user._id, userId: user._id, userName: user.name, userRole: user.role, action: 'owner.bootstrapped', resourceType: 'user', resourceId: String(user._id), details: {} });
+    const user = await User.create({ name: value.name, email: value.email, passwordHash: await bcrypt.hash(value.password, 12), status: 'active' });
+    await ensurePersonalWorkspace(user);
     return signIn(res, user);
   });
+  app.post('/api/auth/bootstrap', limiter, (_req, res) => res.status(410).json({ error: 'Register an account to create your personal workspace.' }));
   app.post('/api/auth/login', limiter, async (req, res) => {
     const value = credentials.parse(req.body);
     const user = await User.findOne({ $or: [{ email: value.email }, { username: value.email }] }).select('+passwordHash +sessionVersion');
@@ -130,14 +116,14 @@ export function createApp({ secret, production = false, bootstrapToken = process
   app.post('/api/auth/logout', async (req, res) => {
     let token;
     try { token = jwt.verify(req.cookies.tempo_session, secret, { algorithms: ['HS256'] }); } catch { /* Already signed out. */ }
-    if (token) await User.updateOne({ _id: token.sub, sessionVersion: token.sv ?? 0 }, { $inc: { sessionVersion: 1 } });
+    if (token) await User.updateOne({ _id: token.sub, sessionVersion: (token.sv ?? 0) === 0 ? { $in: [0, null] } : token.sv }, { $inc: { sessionVersion: 1 } });
     res.clearCookie('tempo_session', { ...cookie, maxAge: undefined });
     res.json({ ok: true });
   });
   app.post('/api/auth/forgot-password', resetRequestLimiter, async (req, res) => {
     const { email } = forgotPasswordInput.parse(req.body);
     const generic = { message: 'If an active account matches that email, a recovery code will be sent.' };
-    const user = await User.findOne({ email, status: 'active' }).select('+resetCodeHash +resetCodeExpiry +resetAttempts +resetRequestCount +resetRequestWindowStart');
+    const user = await User.findOne({ email, ...activeAccount }).select('+resetCodeHash +resetCodeExpiry +resetAttempts +resetRequestCount +resetRequestWindowStart');
     if (!user) return res.json(generic);
     const now = new Date(), windowAge = user.resetRequestWindowStart ? now - user.resetRequestWindowStart : Infinity;
     if (windowAge >= 15 * 60 * 1000) { user.resetRequestWindowStart = now; user.resetRequestCount = 0; }
@@ -157,7 +143,7 @@ export function createApp({ secret, production = false, bootstrapToken = process
   });
   app.post('/api/auth/reset-password', resetVerifyLimiter, async (req, res) => {
     const value = resetPasswordInput.parse(req.body);
-    const user = await User.findOne({ email: value.email, status: 'active' }).select('+passwordHash +resetCodeHash +resetCodeExpiry +resetAttempts +sessionVersion');
+    const user = await User.findOne({ email: value.email, ...activeAccount }).select('+passwordHash +resetCodeHash +resetCodeExpiry +resetAttempts +sessionVersion');
     if (!user || !user.resetCodeHash || !user.resetCodeExpiry || user.resetCodeExpiry <= new Date() || user.resetAttempts >= 5) return invalidReset(res);
     const candidate = Buffer.from(createHash('sha256').update(value.code).digest('hex'), 'hex');
     const expected = Buffer.from(user.resetCodeHash, 'hex');
@@ -167,28 +153,31 @@ export function createApp({ secret, production = false, bootstrapToken = process
     }
     const passwordHash = await bcrypt.hash(value.password, 12);
     // Consume this exact code once, even when requests overlap during hashing.
-    const changed = await User.findOneAndUpdate({ _id: user._id, status: 'active', resetCodeHash: user.resetCodeHash, resetCodeExpiry: { $gt: new Date() }, resetAttempts: { $lt: 5 }, sessionVersion: user.sessionVersion }, {
+    const changed = await User.findOneAndUpdate({ _id: user._id, ...activeAccount, resetCodeHash: user.resetCodeHash, resetCodeExpiry: { $gt: new Date() }, resetAttempts: { $lt: 5 }, sessionVersion: (user.sessionVersion || 0) === 0 ? { $in: [0, null] } : user.sessionVersion }, {
       $set: { passwordHash, mustChangePassword: false, resetAttempts: 0, resetRequestCount: 0 },
       $inc: { sessionVersion: 1 },
       $unset: { resetCodeHash: 1, resetCodeExpiry: 1, resetRequestWindowStart: 1 },
     });
     if (!changed) return invalidReset(res);
-    sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(error => console.error('Password confirmation email delivery failed:', error.message));
+    sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(() => console.error('Password confirmation email delivery failed. Check SMTP configuration.'));
     return res.json({ message: 'Password updated. Sign in with your new password.' });
   });
   app.use('/api', async (req, res, next) => {
-    try {
-      const token = jwt.verify(req.cookies.tempo_session, secret, { algorithms: ['HS256'] });
-      const user = await User.findById(token.sub).select('+sessionVersion');
-      if (!user || user.status !== 'active' || (token.sv ?? 0) !== (user.sessionVersion || 0)) throw new Error('invalid session');
-      req.user = user;
-      req.workspaceId = user.workspaceId || user._id;
-      const members = await User.find({ workspaceId: req.workspaceId }).distinct('_id');
-      req.scope = { $or: [{ workspaceId: req.workspaceId }, { workspaceId: { $exists: false }, userId: { $in: [req.workspaceId, ...members] } }] };
-      req.memberScope = { $or: [{ workspaceId: req.workspaceId }, { _id: req.workspaceId }] };
-      if (user.mustChangePassword && !['/api/auth/me', '/api/auth/logout', '/api/auth/change-password'].includes(req.originalUrl.split('?')[0])) return res.status(403).json({ error: 'Change your temporary password to continue.' });
-      return next();
-    } catch { res.clearCookie('tempo_session', { ...cookie, maxAge: undefined }); return res.status(401).json({ error: 'Please sign in to continue' }); }
+    let token;
+    try { token = jwt.verify(req.cookies.tempo_session, secret, { algorithms: ['HS256'] }); }
+    catch { res.clearCookie('tempo_session', { ...cookie, maxAge: undefined }); return res.status(401).json({ error: 'Please sign in to continue' }); }
+    const user = await User.findById(token.sub).select('+sessionVersion');
+    if (!user || user.status !== 'active' || (token.sv ?? 0) !== (user.sessionVersion || 0)) return res.status(401).json({ error: 'Please sign in to continue' });
+    req.user = user;
+    const pathname = req.originalUrl.split('?')[0];
+    if (user.mustChangePassword && !['/api/auth/me', '/api/auth/change-password'].includes(pathname)) return res.status(403).json({ error: 'Change your temporary password to continue.' });
+    // Account/invitation/list/switch endpoints remain usable after a membership is removed.
+    const accountRoute = pathname.startsWith('/api/auth/') || pathname.startsWith('/api/invitations/') || pathname === '/api/workspaces' || /^\/api\/workspaces\/[^/]+\/select$/.test(pathname);
+    const context = await workspaceContext(user, accountRoute ? undefined : req.get('X-Workspace-Id'));
+    req.workspace = context.workspace; req.membership = context.membership;
+    req.workspaceId = context.workspace._id; req.scope = { workspaceId: req.workspaceId };
+    await context.membership.updateOne({ $set: { lastActive: new Date() } });
+    return next();
   });
   app.post('/api/auth/change-password', limiter, async (req, res) => {
     const value = passwordChangeInput.parse(req.body);
@@ -203,78 +192,12 @@ export function createApp({ secret, production = false, bootstrapToken = process
     sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(error => console.error('Password confirmation email delivery failed:', error.message));
     return signIn(res, user);
   });
-  app.post('/api/auth/claim-owner', limiter, async (req, res) => {
-    if (!bootstrapToken) return res.status(503).json({ error: 'Configure ADMIN_BOOTSTRAP_TOKEN on the server to verify ownership.' });
-    const supplied = Buffer.from(req.get('X-Admin-Bootstrap-Token') || ''), expected = Buffer.from(bootstrapToken);
-    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return res.status(403).json({ error: 'Owner setup token is invalid.' });
-    if (await User.exists({ isPrimaryAdmin: true })) return res.status(409).json({ error: 'The owner is already configured.' });
-    const user = await User.findById(req.user._id).select('+sessionVersion');
-    user.role = 'admin'; user.isPrimaryAdmin = true; user.workspaceId = user._id;
-    user.sessionVersion = (user.sessionVersion || 0) + 1;
-    await user.save();
-    const legacyScope = { userId: user._id, workspaceId: { $exists: false } };
-    await Promise.all([Website, WorkLog, MonthlyAllocation, AuditLog].map(model => model.updateMany(legacyScope, { $set: { workspaceId: user._id } })));
-    req.user = user; req.workspaceId = user._id;
-    await audit(req, 'owner.claimed', 'user', user._id);
-    return signIn(res, user);
-  });
-  app.get('/api/auth/me', (req, res) => res.json(req.user.toJSON()));
-  app.get('/api/users', ownerOnly, async (req, res) => {
-    const users = await User.find(req.memberScope).select('-passwordHash -resetCodeHash -resetCodeExpiry -resetAttempts -resetRequestCount -resetRequestWindowStart -sessionVersion').sort({ createdAt: -1 });
-    res.json(users.map(user => user.toJSON()));
-  });
-  app.post('/api/users', ownerOnly, async (req, res) => {
-    const value = managedUserInput.parse(req.body);
-    const user = await User.create({ workspaceId: req.workspaceId, name: value.name, email: value.email, username: value.username, passwordHash: await bcrypt.hash(value.password, 12), role: value.role, status: value.status, mustChangePassword: true });
-    let invitationSent = false;
-    try { if (value.sendInvitation) { await sendMail({ to: user.email, ...invitationEmail({ name: user.name, email: user.email, password: value.password, loginUrl: appUrl }) }); invitationSent = true; } }
-    catch { /* Account stays available for manual credential sharing. */ }
-    await audit(req, 'user.created', 'user', user._id, { role: user.role, status: user.status });
-    res.set('Cache-Control', 'no-store').status(201).json({ ...user.toJSON(), invitationSent });
-  });
-  app.put('/api/users/:id', ownerOnly, async (req, res) => {
-    const userId = id.parse(req.params.id), value = managedUserUpdateInput.parse(req.body);
-    const user = await User.findOne({ _id: userId, ...req.memberScope }).select('+sessionVersion');
-    if (!user) return res.status(404).json({ error: 'User not found.' });
-    if (user.isPrimaryAdmin && !req.user.isPrimaryAdmin) return res.status(403).json({ error: 'Only the primary Admin can change their account details.' });
-    if (String(user._id) === String(req.user._id) && (value.status === 'inactive' || (value.role && value.role !== 'admin'))) return res.status(403).json({ error: 'Admins cannot remove their own management access.' });
-    if (user.isPrimaryAdmin && ((value.role && value.role !== 'admin') || value.status === 'inactive')) return res.status(403).json({ error: 'The primary Admin cannot be downgraded or deactivated.' });
-    const wasActive = user.status === 'active';
-    if (!user.isPrimaryAdmin && value.role === 'admin') return res.status(400).json({ error: 'Choose Editor or Viewer. Ownership cannot be assigned here.' });
-    Object.assign(user, value);
-    if (wasActive && user.status === 'inactive') { user.sessionVersion = (user.sessionVersion || 0) + 1; user.resetCodeHash = undefined; user.resetCodeExpiry = undefined; }
-    await user.save();
-    await audit(req, 'user.updated', 'user', user._id, { role: user.role, status: user.status });
-    if (wasActive && user.status === 'inactive') sendMail({ to: user.email, ...deactivationEmail({ name: user.name }) }).catch(error => console.error('Account deactivation email delivery failed:', error.message));
-    res.json(user.toJSON());
-  });
-  app.post('/api/users/:id/reset-password', ownerOnly, async (req, res) => {
-    const user = await User.findOne({ _id: id.parse(req.params.id), ...req.memberScope }).select('+sessionVersion');
-    if (!user) return res.status(404).json({ error: 'User not found.' });
-    if (user.isPrimaryAdmin) return res.status(403).json({ error: 'Use the password recovery flow for the primary Admin.' });
-    if (user.status !== 'active') return res.status(409).json({ error: 'Reactivate this account before resetting its password.' });
-    const temporaryPassword = randomBytes(24).toString('base64url');
-    // Return this newly generated password only once to the verified owner.
-    let invitationSent = false;
-    try { await sendMail({ to: user.email, ...temporaryPasswordEmail({ name: user.name, email: user.email, password: temporaryPassword, loginUrl: appUrl }) }); invitationSent = true; } catch { /* Manual sharing remains available. */ }
-    user.passwordHash = await bcrypt.hash(temporaryPassword, 12);
-    user.mustChangePassword = true;
-    user.sessionVersion = (user.sessionVersion || 0) + 1;
-    user.resetCodeHash = undefined;
-    user.resetCodeExpiry = undefined;
-    await user.save();
-    await audit(req, 'user.password_reset', 'user', user._id, {});
-    res.set('Cache-Control', 'no-store').json({ temporaryPassword, invitationSent, user: user.toJSON() });
-  });
-  app.delete('/api/users/:id', ownerOnly, async (req, res) => {
-    const user = await User.findOne({ _id: id.parse(req.params.id), ...req.memberScope });
-    if (!user) return res.status(404).json({ error: 'User not found.' });
-    if (user.isPrimaryAdmin) return res.status(403).json({ error: 'The primary Admin account cannot be deleted.' });
-    if (String(user._id) === String(req.user._id)) return res.status(403).json({ error: 'Admins cannot delete their own account.' });
-    await audit(req, 'user.deleted', 'user', user._id, { role: user.role });
-    await User.deleteOne({ _id: user._id });
-    res.json({ ok: true });
-  });
+  app.post('/api/auth/claim-owner', (_req, res) => res.status(410).json({ error: 'Your personal workspace already has you as its owner.' }));
+  app.get('/api/auth/me', async (req, res) => res.json(accountPayload(req.user, await workspaceContext(req.user))));
+  const invitationLimiter = rateLimit({ windowMs: 15 * 60000, limit: 40, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many invitation requests. Try again later.' } });
+  installWorkspaceRoutes(app, { sendMail, appUrl, ownerOnly, audit, invitationLimiter });
+  // Membership owners must never reset or delete another person's login identity.
+  app.use('/api/users', ownerOnly, (_req, res) => res.status(410).json({ error: 'Use Workspace Members to invite and manage memberships. Accounts are independent.' }));
   app.get('/api/audit-logs', ownerOnly, async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
     const logs = await AuditLog.find(req.scope).sort({ createdAt: -1 }).limit(limit).lean();
@@ -282,7 +205,7 @@ export function createApp({ secret, production = false, bootstrapToken = process
   });
   app.get('/api/data', async (req, res) => {
     const [websites, logs, allocations] = await Promise.all([Website.find(req.scope).sort({ createdAt: -1 }), WorkLog.find(req.scope).sort({ date: -1, createdAt: -1 }), MonthlyAllocation.find(req.scope)]);
-    res.json({ websites, logs, allocations });
+    res.json({ websites, logs, allocations, workspaceId: String(req.workspaceId), workspaceName: req.workspace.name, role: req.membership.role });
   });
   const findWebsite = async (req, websiteId) => { const w = await Website.findOne({ _id: id.parse(websiteId), ...req.scope }); if (!w) throw Object.assign(new Error('Website not found'), { status: 404 }); return w; };
   app.post('/api/websites', requireRoles('admin', 'editor'), async (req, res) => { const website = await Website.create({ ...websiteInput.parse(req.body), workspaceId: req.workspaceId, userId: req.user._id }); await audit(req, 'website.created', 'website', website._id, { name: website.name }); res.status(201).json(website); });
@@ -335,6 +258,6 @@ export function createApp({ secret, production = false, bootstrapToken = process
     res.type('application/vnd.openxmlformats-officedocument.spreadsheetml.sheet').attachment('tempo-work-report.xlsx'); await workbook.xlsx.write(res); res.end();
   });
   app.use('/api', (_req, res) => res.status(404).json({ error: 'API route not found' }));
-  app.use((err, _req, res, _next) => { if (err.name === 'ZodError') return res.status(400).json({ error: err.issues.map(i => `${i.path.join('.') || 'Entry'}: ${i.message}`).join('; ') }); if (err.code === 11000) return res.status(409).json({ error: 'An account with this email already exists' }); if (err.status) return res.status(err.status).json({ error: err.message }); console.error(err); res.status(500).json({ error: 'Something went wrong. Please try again.' }); });
+  app.use((err, _req, res, _next) => { if (err.name === 'ZodError') return res.status(400).json({ error: err.issues.map(i => `${i.path.join('.') || 'Entry'}: ${i.message}`).join('; ') }); if (err.code === 11000) return res.status(409).json({ error: 'An account, membership or pending invitation already exists' }); if (err.status) return res.status(err.status).json({ error: err.message }); console.error(err); res.status(500).json({ error: 'Something went wrong. Please try again.' }); });
   return app;
 }

@@ -20,6 +20,11 @@ export function recoveryEmail({ name, code }) {
   return { subject: 'Your Tempo password recovery code', ...template('Reset your password', [`Hello ${name}, use this one-time code to reset your Tempo password.`, 'The code expires in 10 minutes.', code], 'If you did not request this, you can ignore this email.') };
 }
 
+export function workspaceInvitationEmail({ workspaceName, inviterName, role, url }) {
+  const content = template('Workspace invitation', [`${inviterName} invited you to ${workspaceName} as ${role}.`, 'Sign in with this email address, or register your own account, then accept or reject the invitation.', 'The invitation expires in 7 days. Your personal workspace and other roles remain unchanged.']);
+  return { subject: `Invitation to ${workspaceName} on Tempo`, text: `${content.text}\n\n${url}`, html: content.html.replace('</main>', `<p><a href="${escapeHtml(url)}">Review workspace invitation</a></p></main>`) };
+}
+
 export function passwordChangedEmail({ name }) {
   return { subject: 'Your Tempo password was changed', ...template('Password changed', [`Hello ${name}, your Tempo password has been changed.`, 'All other active sessions have been signed out.'], 'If you did not make this change, contact your application administrator.') };
 }
@@ -34,6 +39,9 @@ export async function sendConfiguredEmail(message, environment = process.env) {
     throw Object.assign(new Error('Email delivery is not configured. Set the SMTP environment variables.'), { status: 503 });
   }
   const transport = nodemailer.createTransport({
+    connectionTimeout: 10000,
+    greetingTimeout: 10000,
+    socketTimeout: 20000,
     host: environment.SMTP_HOST,
     port,
     secure: port === 465,

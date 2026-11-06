@@ -1,69 +1,58 @@
-# Deployment and initialization
+﻿# Deployment and migration guide
 
-## Observed state on 6 November 2026
+## Runtime configuration
 
-Local `.env` uses localhost MongoDB and has a JWT secret meeting the minimum length. Owner-bootstrap token, APP_URL and SMTP settings are absent/empty. A read-only connection attempt timed out; the configured database was not verified. Local env values do not establish Vercel configuration. No production settings were inspected or changed, no live deployment was verified, and no application database records were changed by this handover.
+Use Node 24.x, Vite preset, `npm run build`, output `dist`, and the repository root on Vercel. Keep the existing `api/index.js` function and rewrites. The local persistent MongoDB helper is development-only.
 
-## Local startup
+Configure these server-side variables privately:
 
-1. Use Node 24.x. Install locked dependencies with `npm.cmd ci` if needed.
-2. Run `npm.cmd run setup`. It preserves configured values, appends missing keys, and generates a local ADMIN_BOOTSTRAP_TOKEN. Inspect/edit `.env` privately; do not send its contents in chat.
-3. Start an installed local MongoDB service, use the existing persistent development helper `npm.cmd run db`, or configure an authorized Atlas development database. The helper stores records in `.data/mongodb`; never delete this folder to fix connectivity.
-4. Set SMTP variables and APP_URL as below. Run `npm.cmd run dev`, open http://127.0.0.1:5173, and choose Set up primary Admin if an owner does not exist. Enter the token privately and choose your own name, email and password.
-5. Remove the local bootstrap token after successful setup and restart the API. Do not initialize a second owner or change an existing user's credentials without authorization.
+- `MONGODB_URI`: intended Atlas database, with database-scoped credentials and network access for Vercel. Never localhost in production; use a separate preview database.
+- `JWT_SECRET`: stable random value of at least 32 characters. Rotating it signs everyone out.
+- `APP_URL`: canonical HTTPS application URL, currently https://tracker-two-wine.vercel.app/ for the existing site. Invitation links use this address.
+- `NODE_ENV=production` for secure cookies over HTTPS.
+- `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM_EMAIL`, and optional `SMTP_FROM_NAME`: the provider connection and authorized sender. Port 465 uses implicit TLS; other ports use STARTTLS when supported.
 
-For a local built version use `npm.cmd run build` and `npm.cmd start`, then http://127.0.0.1:3001. Keep NODE_ENV=development for local HTTP; production cookies require HTTPS.
+`ADMIN_BOOTSTRAP_TOKEN` is no longer used. Every authenticated account owns its personal workspace. No owner-token setup or hardcoded owner email is needed. Do not change production variables without the owner's approval. Vercel variable changes require a new deployment. Never use VITE_ prefixes for secrets.
 
-## Vercel and Atlas
+## Existing-data migration plan
 
-These steps require the owner's external account access. Obtain approval before changing production variables, redeploying, or migrating data.
+The schema change is additive. Users and project records keep their IDs and passwords. Personal Workspace IDs reuse User IDs, so prior explicit workspaceId fields remain valid. Memberships have a unique workspace/user index. New code no longer reads User.role or isPrimaryAdmin for permissions.
 
-| Setting | Required value/purpose |
-| --- | --- |
-| Node runtime | 24.x, matching package.json. |
-| Framework/build/output | Vite / npm run build / dist. Repository root is the project root. |
-| MONGODB_URI | Atlas Drivers connection string with the intended application database; never localhost. URL-encode credentials. |
-| JWT_SECRET | Unique random secret of at least 32 characters; keep stable across deployments unless intentionally invalidating sessions. |
-| NODE_ENV | production. |
-| ADMIN_BOOTSTRAP_TOKEN | Long random one-time secret until the primary Admin exists. Remove after setup and redeploy. |
-| APP_URL | Deployed HTTPS application URL used in invitation/reset emails. |
-| SMTP_HOST / SMTP_PORT | Provider host and port, commonly 587 or 465. |
-| SMTP_USER / SMTP_PASSWORD | Provider credentials or application password. |
-| SMTP_FROM_EMAIL / SMTP_FROM_NAME | Authorized sender email and display name. |
+On sign-in/authenticated use, provisioning creates the account's personal Workspace and Owner membership. For an old team account with an explicit foreign User.workspaceId, the recorded old team relationship is preserved separately as Editor/Viewer; it also receives its own personal workspace. Existing inactive identities remain inactive. New invitations always require explicit acceptance.
 
-Use a database-scoped Atlas user and configure network access for Vercel's outbound connections. Choose a separate preview database to prevent previews from sharing production records. Set variables in the correct Vercel environment scope. Never use a VITE_ prefix for secrets. Updating variables requires a new deployment; changing the local `.env` does not update Vercel.
+Missing website workspace IDs are stamped using recorded legacy ownership. Missing work-log/allocation IDs follow their website, including entries made by another teammate. Explicit workspace IDs are never overwritten. Missing legacy owner references fail for operator review. Orphan records whose website/creator cannot be established are not deleted or guessed into another tenant; inspect them separately.
 
-`vercel.json` sends API paths to `api/index.js` and application paths to index.html. The API connects to Atlas and reuses its warm connection pool. Do not run the local database helper or npm start as a Vercel build command.
-
-After deployment, visit `/api/auth/setup-status`: a successful JSON response verifies function startup and database availability at that moment. If needsOwner is true and bootstrapEnabled is true, initialize the owner through the UI. If an owner already exists, sign in or use recovery; do not reset the database. Remove ADMIN_BOOTSTRAP_TOKEN after initialization, redeploy, and check setup status again.
-
-## SMTP and acceptance checks
-
-SMTP delivery was tested only with an injected sender in isolated tests. Real sender authorization, DNS/TLS, provider quotas and inbox delivery still require verification with the configured provider.
-
-- Create one Editor and Viewer through User Management and verify invitations arrive. Change their temporary passwords at first sign-in.
-- Confirm Editor CRUD and Viewer read/export access. A direct Viewer POST/PUT/DELETE API request must return 403.
-- Request a recovery code, confirm delivery, use it once, verify reuse fails, and verify expiry after 10 minutes. Confirm old sessions fail after reset.
-- Download individual and combined CSV/Excel files, including inactive websites and historical logs.
-- Check dashboard totals, zero monthly overrides, yearly report filters and mobile layout using representative authorized data.
-- Test Admin account changes in Settings. Logout invalidates all sessions for that account.
-
-## Diagnosing a 503
-
-The Vercel adapter now returns a generic JSON 503 even when JWT_SECRET is missing. Function logs distinguish missing MONGODB_URI, invalid JWT_SECRET, and database connection failure without printing credentials. For connection failure, check Atlas credentials, database permissions, network rules and cluster availability. Redeploy after correcting env configuration. A local isolated test pass does not prove these production settings.
-
-Rate-limit stores are per process/function instance. Configure deployment-wide protection with a shared store or hosting firewall before exposing the service broadly. Preserve backups through Atlas snapshots or database tools; the JSON export is workspace data only and has no restore workflow. Any restore or destructive migration requires separate approval.
-
-## Upgrade an existing owner without recreating the account
-
-After deploying the owner-access update, sign in with the existing account. If no owner is configured, an Enable owner access banner appears. Configure a long random ADMIN_BOOTSTRAP_TOKEN privately in Vercel (with production configuration approval) and redeploy if needed. Enter that token into the banner and choose Enable User Management. The API verifies the token, preserves the user ID/password and existing work, sets the owner/workspace fields, and refreshes the session. The menu then appears. Remove the token and redeploy after success. If another owner already exists, the API refuses the claim. Never paste the token or passwords into chat.
-
-An operator with authorized database access can alternatively preview a specific existing account:
+A bulk upgrade is available when the operator has authorized database access:
 
 ```powershell
-node scripts/upgrade-owner.js --email owner@example.com
+node scripts/migrate-workspaces.js
 ```
 
-This uses the configured server-only MONGODB_URI, disables automatic index/collection creation, and defaults to a dry run. Review the selected account and counts before repeating with --apply. The explicit apply promotes only that existing account, invalidates previous sessions on first promotion, and stamps its owned legacy records with workspaceId. It does not change passwords, delete records, attach unrelated accounts, or transfer ownership from another owner. Keep the existing unique primary-owner index in place. For a partially completed stamping run the operation is idempotent. Sign in again after CLI promotion. Do not run an apply against production without authorization.
+This defaults to a read-only preview: counts and pending accounts only. It disables automatic collection/index creation during preview. Verify the target MONGODB_URI privately and review the output before applying. No live production migration was executed from this development environment.
 
-For existing collaborators created before workspaceId was introduced, do not infer membership from email or a role. Verify their ownership relationship before any explicit membership migration. New accounts created from User Management are associated automatically. Global email/username uniqueness is preserved for backward-compatible login.
+```powershell
+node scripts/migrate-workspaces.js --apply
+```
+
+Before any upgrade writes, apply saves an Extended JSON snapshot of users, workspaces, memberships, invitations, websites, work logs, allocations and audit logs under `.data/backups/before-workspaces-*.ejson`. It contains private password/token hashes; keep it out of Git and protect it with filesystem permissions. Apply creates only the new indexes (no drops/syncIndexes), then runs the same repeatable per-account upgrade. A failed run is safe to inspect and retry; it does not reset records or duplicate personal workspaces/projects.
+
+Use an Atlas snapshot / operational database backup and a maintenance window for production backup consistency. The CLI's sequential snapshot is a recovery artifact, not a point-in-time database snapshot during concurrent writes. Any database restore or destructive migration requires separate authorization. The former `scripts/upgrade-owner.js` now only explains the replacement workflow and does not mutate ownership.
+
+## Invitations and live acceptance checks
+
+Registration works without SMTP. Invitation delivery and password recovery require real SMTP. If SMTP or APP_URL is missing, the owner sees a failed-delivery invitation and can resend after configuration. No account is created and no access is granted merely by inviting an address.
+
+1. Register three authorized test identities against a non-production database; each should see only its personal workspace as Owner.
+2. Person 1 invites Person 2 as Editor and Person 3 as Viewer. Check delivered emails and links; recipients accept with the matching email account.
+3. Switch Person 2 into Person 1's workspace: project/log/allocation writes work. Switch back: only personal data appears and Workspace Members returns.
+4. Switch Person 3 into Person 1's workspace: read/export works and direct POST/PUT/DELETE requests return 403.
+5. Invite Person 1 from Person 2's personal workspace. After acceptance, Person 1 is Owner personally and Editor there.
+6. Check reject, expiry, resend-token rotation and cancellation. Changing/removing a membership must not affect the account, personal workspace or unrelated memberships.
+7. Verify individual, combined and filtered CSV/Excel exports contain only the selected workspace. Check mobile switching and last-selection persistence.
+8. Verify ten-minute single-use password recovery, logout/session invalidation and pre-existing temporary-password changes.
+
+## Operational limits
+
+Vercel success establishes that the release built and deployed, not that a user's private Atlas records or inbox delivery were inspected. Local tests use isolated real MongoDB instances with an injected email sender. Real SMTP remains separately verifiable with owner-provided configuration.
+
+Rate limits are in-process. Configure deployment-wide limits through a shared store or hosting controls for public signup. Cross-collection CRUD/audit and invitation-grant operations are not MongoDB transactions; a hard process failure during a grant can require a replacement invitation. No account deletion/reset powers are granted to workspace owners. Backups in the app remain selected-workspace JSON exports; they do not implement an account restore UI.

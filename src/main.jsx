@@ -2,11 +2,13 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { Activity, ArrowDownToLine, ArrowLeft, ArrowRight, ArrowUpRight, CalendarDays, ChartNoAxesCombined, Check, ChevronDown, ChevronLeft, ChevronRight, CircleHelp, Clock3, Copy, Ellipsis, ExternalLink, Eye, Globe2, KeyRound, LayoutDashboard, LogOut, Menu, Moon, Pencil, Plus, Search, Settings2, ShieldCheck, Sun, Trash2, Users, X } from 'lucide-react';
 import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis, BarChart, Bar, Cell } from 'recharts';
-import { api, download } from './api';
+import { api, download, setActiveWorkspace } from './api';
+import Auth from './Auth';
+import WorkspaceMembers, { InvitationPanel, WorkspaceNameForm } from './WorkspaceMembers';
 import { categories, dateKey, duration, monthKey, monthlyStats, reportRows } from '../shared/tracking';
 import './styles.css';
 
-const NAV = [['Dashboard', LayoutDashboard], ['My Websites', Globe2], ['Calendar', CalendarDays], ['Work Logs', Clock3], ['Reports', ChartNoAxesCombined], ['User Management', Users], ['Settings', Settings2]];
+const NAV = [['Dashboard', LayoutDashboard], ['My Websites', Globe2], ['Calendar', CalendarDays], ['Work Logs', Clock3], ['Reports', ChartNoAxesCombined], ['Workspace Members', Users], ['Settings', Settings2]];
 const COLORS = ['#587859', '#ad8c68', '#8486a7', '#789ca2', '#bd887e', '#8d9e6b', '#6888ac'];
 const MONTHS = Array.from({ length: 12 }, (_, i) => new Date(2026, i).toLocaleString('en', { month: 'long' }));
 function prettyDate(v, options = {}) { return new Date(v + 'T12:00:00').toLocaleDateString('en', { month: 'short', day: 'numeric', ...options }); }
@@ -14,6 +16,21 @@ function SiteIcon({ website, index = 0 }) { return <span className="site-icon" s
 function Empty({ icon: Icon = Globe2, title, text, action, onAction }) { return <div className="empty"><Icon size={30}/><h3>{title}</h3><p>{text}</p>{action && <button className="button primary" onClick={onAction}><Plus size={16}/>{action}</button>}</div>; }
 function App() {
   const [user, setUser] = useState(null), [boot, setBoot] = useState(true), [authError, setAuthError] = useState('');
+  const generation = useRef(0), activeId = useRef('');
+  const [workspaces, setWorkspaces] = useState([]), [switching, setSwitching] = useState(false);
+  const [invitationToken, setInvitationToken] = useState(() => new URLSearchParams(window.location.hash.slice(1)).get('invitation'));
+  useEffect(() => {
+    const onHashChange = () => setInvitationToken(new URLSearchParams(window.location.hash.slice(1)).get('invitation'));
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
+  const handleAuth = value => {
+    if (activeId.current !== value.workspaceId) {
+      generation.current++; setData({ websites: [], logs: [], allocations: [] }); setModal(null); setPage('Dashboard');
+    }
+    activeId.current = value.workspaceId; setActiveWorkspace(value.workspaceId); setUser(value);
+    setWorkspaces(previous => previous.map(w => w.id === value.workspaceId ? { ...w, name: value.workspaceName, role: value.role } : w));
+  };
   const [data, setData] = useState({ websites: [], logs: [], allocations: [] });
   const [page, setPage] = useState('Dashboard'), [month, setMonth] = useState(dateKey().slice(0, 7));
   const [theme, setTheme] = useState(localStorage.getItem('tempo-theme') || 'light'), [sidebar, setSidebar] = useState(false);
@@ -21,12 +38,26 @@ function App() {
   const [exporting, setExporting] = useState(false), [exportError, setExportError] = useState('');
   const [search, setSearch] = useState('');
   const [year, monthNumber] = month.split('-').map(Number);
-  const canEdit = user?.role === 'admin' || user?.role === 'editor';
+  const canEdit = user?.role === 'owner' || user?.role === 'editor';
   const isAdmin = Boolean(user?.isPrimaryAdmin);
-  const navItems = useMemo(() => NAV.filter(([label]) => label !== 'User Management' || isAdmin).filter(([label]) => label !== 'Settings' || isAdmin), [isAdmin]);
-  const refresh = async () => { setLoading(true); try { setData(await api('/data')); setError(''); } catch (e) { setError(e.message); if (e.status === 401) setUser(null); } finally { setLoading(false); } };
-  useEffect(() => { api('/auth/me').then(u => { setUser(u); }).catch(e => { if (e.status !== 401) setAuthError(e.message); }).finally(() => setBoot(false)); }, []);
-  useEffect(() => { if (user) refresh(); }, [user]);
+  const navItems = useMemo(() => NAV.filter(([label]) => label !== 'Workspace Members' || isAdmin).filter(([label]) => label !== 'Settings' || isAdmin), [isAdmin]);
+  const refresh = async () => {
+    const version = generation.current, workspaceId = activeId.current; setLoading(true);
+    try { const result = await api('/data'); if (version !== generation.current || workspaceId !== activeId.current) return; setData(result); setUser(previous => previous && previous.workspaceId === workspaceId && (previous.role !== result.role || previous.workspaceName !== result.workspaceName) ? { ...previous, role: result.role, workspaceName: result.workspaceName, isPrimaryAdmin: result.role === 'owner' } : previous); setError(''); }
+    catch(e) { if (version !== generation.current) return; setError(e.message); if (e.status === 403) { generation.current++; setData({ websites: [], logs: [], allocations: [] }); try { handleAuth(await api('/auth/me')); } catch {} } if (e.status === 401) { generation.current++; setUser(null); setActiveWorkspace(''); } }
+    finally { if (version === generation.current) setLoading(false); }
+  };
+  const loadWorkspaces = async () => setWorkspaces(await api('/workspaces'));
+  const switchWorkspace = async id => {
+    if (busy || exporting || switching) return;
+    generation.current++; setSwitching(true); setData({ websites: [], logs: [], allocations: [] }); setModal(null); setSearch(''); setError(''); setExportError('');
+    try { const selected = await api('/workspaces/' + encodeURIComponent(id) + '/select', { method: 'POST' }); setPage('Dashboard'); handleAuth(selected); }
+    catch(e) { setError(e.message); await refresh(); }
+    finally { setSwitching(false); }
+  };
+  const finishInvitation = async workspaceId => { setInvitationToken(null); window.history.replaceState(null, '', window.location.pathname + window.location.search); await loadWorkspaces(); if (workspaceId) await switchWorkspace(workspaceId); };
+  useEffect(() => { api('/auth/me').then(handleAuth).catch(e => { if (e.status !== 401) setAuthError(e.message); }).finally(() => setBoot(false)); }, []);
+  useEffect(() => { if (user && !user.mustChangePassword) { refresh(); loadWorkspaces().catch(e => setError(e.message)); } }, [user?.id, user?.workspaceId, user?.mustChangePassword]);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('tempo-theme', theme); }, [theme]);
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(''), 4000); return () => clearTimeout(timer); } }, [toast]);
   useEffect(() => { const onDownloadError = event => setExportError(event.detail); window.addEventListener('tempo-download-error', onDownloadError); return () => window.removeEventListener('tempo-download-error', onDownloadError); }, []);
@@ -40,21 +71,22 @@ function App() {
   const remove = (kind, value) => setModal({ type: 'delete', kind, value });
   const duplicate = l => { const { websiteId, date, description, category, hours, minutes, notes } = l; mutate('/logs', 'POST', { websiteId, date, description, category, hours, minutes, notes }, 'Work log duplicated').catch(e => setError(e.message)); };
   if (boot) return <div className="boot"><span className="brand-mark">t</span><p>Opening your workspace…</p></div>;
-  if (!user) return <Auth onAuth={setUser} initialError={authError}/>;
-  if (user.mustChangePassword) return <PasswordChange onComplete={setUser}/>;
+  if (!user) return <Auth onAuth={handleAuth} initialError={authError}/>;
+  if (user.mustChangePassword) return <PasswordChange onComplete={handleAuth}/>;
   return <div className="app-shell">
     {sidebar && <div className="sidebar-shade" onClick={() => setSidebar(false)}/>}
     <aside className={`sidebar ${sidebar ? 'is-open' : ''}`}>
       <a className="brand" href="#dashboard" onClick={() => changePage('Dashboard')}><span className="brand-mark">t<span>•</span></span>tempo<span className="brand-dot">®</span></a>
-      <div className="workspace-label"><span className="workspace-avatar">{user.name[0].toUpperCase()}</span><div><strong>My workspace</strong><small>Website hours tracker</small></div><ChevronDown size={14}/></div>
+      <label className="workspace-label workspace-switcher"><span className="workspace-avatar">{user.workspaceName?.[0]?.toUpperCase()}</span><div><small>Active workspace</small><select aria-label="Active workspace" value={user.workspaceId} disabled={busy || exporting || switching} onChange={e => switchWorkspace(e.target.value)}>{(workspaces.length ? workspaces : [{ id: user.workspaceId, name: user.workspaceName, role: user.role }]).map(w => <option key={w.id} value={w.id}>{w.name} ({w.role})</option>)}</select></div></label>
       <div className="nav-label">WORKSPACE</div>
         <nav>{navItems.map(([label, Icon]) => <button key={label} className={`nav-item ${page === label ? 'active' : ''} ${label === 'Settings' ? 'settings-nav' : ''}`} onClick={() => changePage(label)}><Icon size={18}/><span>{label}</span>{label === 'My Websites' && <span className="nav-count">{data.websites.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="sidebar-note"><span className="note-icon"><Activity size={18}/></span><strong>A little progress, every day.</strong><p>Make time for the work<br/>that makes a difference.</p></div><button className="help-link" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17}/> Help & getting started <ArrowUpRight size={14}/></button><div className="profile"><span className="user-avatar">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>Personal workspace</small></div><button className="icon-button" title="Sign out" onClick={async () => { try { await api('/auth/logout', { method: 'POST' }); setUser(null); setData({ websites: [], logs: [], allocations: [] }); } catch(e) { setError(e.message); } }}><LogOut size={16}/></button></div></div>
+      <div className="sidebar-bottom"><div className="sidebar-note"><span className="note-icon"><Activity size={18}/></span><strong>A little progress, every day.</strong><p>Make time for the work<br/>that makes a difference.</p></div><button className="help-link" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17}/> Help & getting started <ArrowUpRight size={14}/></button><div className="profile"><span className="user-avatar">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>Personal workspace</small></div><button className="icon-button" title="Sign out" onClick={async () => { try { await api('/auth/logout', { method: 'POST' }); generation.current++; setUser(null); setActiveWorkspace(''); setWorkspaces([]); setData({ websites: [], logs: [], allocations: [] }); } catch(e) { setError(e.message); } }}><LogOut size={16}/></button></div></div>
     </aside>
     <div className="main-shell"><header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-menu" aria-label="Open menu" onClick={() => setSidebar(true)}><Menu size={20}/></button><span>Workspace</span><ChevronRight size={13}/><strong>{page}</strong></div><div className="topbar-actions"><span className="local-date">{new Date().toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span><span className="topbar-divider"/><button className="icon-button" aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`} onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={18}/> : <Sun size={18}/>}</button><span className="mini-avatar">{user.name[0].toUpperCase()}</span></div></header>
-    <main className={canEdit ? '' : 'read-only'}>
-        <div className="page-heading"><div><div className="eyebrow">YOUR TIME, WELL SPENT</div><h1>{page === 'Dashboard' ? 'A clear view of your work.' : page}</h1><p>{({ Dashboard: 'Every website. Every hour. All moving forward.', 'My Websites': 'A home for every website you look after.', Calendar: 'See the rhythm of your work, one day at a time.', 'Work Logs': 'The small steps behind your bigger progress.', Reports: 'Turn your working hours into a clearer picture.', 'User Management': 'Manage workspace access and review important activity.', Settings: 'Make this workspace feel like yours.' })[page]}</p></div><div className="heading-actions">{!['Settings', 'User Management'].includes(page) && <label className="month-picker"><CalendarDays size={16}/><input aria-label="Selected month" type="month" min="1900-01" max="2200-12" value={month} onChange={e => e.target.value && setMonth(e.target.value)}/></label>}{canEdit && page !== 'User Management' && <button className="button primary" onClick={() => page === 'My Websites' ? setModal({ type: 'website' }) : openLog()}><Plus size={17}/>{page === 'My Websites' ? 'Add website' : 'Log work'}</button>}</div></div>
-      {!user.isPrimaryAdmin && <OwnerSetup onComplete={setUser}/>}
+    <main key={user.workspaceId} className={canEdit ? '' : 'read-only'}>
+        <div className="page-heading"><div><div className="eyebrow">YOUR TIME, WELL SPENT</div><h1>{page === 'Dashboard' ? 'A clear view of your work.' : page}</h1><p>{({ Dashboard: 'Every website. Every hour. All moving forward.', 'My Websites': 'A home for every website you look after.', Calendar: 'See the rhythm of your work, one day at a time.', 'Work Logs': 'The small steps behind your bigger progress.', Reports: 'Turn your working hours into a clearer picture.', 'Workspace Members': 'Manage workspace access and review important activity.', Settings: 'Make this workspace feel like yours.' })[page]}</p></div><div className="heading-actions">{!['Settings', 'Workspace Members'].includes(page) && <label className="month-picker"><CalendarDays size={16}/><input aria-label="Selected month" type="month" min="1900-01" max="2200-12" value={month} onChange={e => e.target.value && setMonth(e.target.value)}/></label>}{canEdit && page !== 'Workspace Members' && <button className="button primary" onClick={() => page === 'My Websites' ? setModal({ type: 'website' }) : openLog()}><Plus size={17}/>{page === 'My Websites' ? 'Add website' : 'Log work'}</button>}</div></div>
+      {invitationToken && <InvitationPanel key={invitationToken} token={invitationToken} onDone={finishInvitation}/>}
+      {switching && <p role="status">Switching workspace?</p>}
       {error && <div className="alert error">{error}<button onClick={refresh}>Try again</button><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={16}/></button></div>}
       {exportError && <div className="alert error" role="alert">{exportError}<button className="icon-button" aria-label="Dismiss export error" onClick={() => setExportError('')}><X size={16}/></button></div>}
       {loading && <div className="loading-line" role="status">Syncing your workspace…</div>}
@@ -72,8 +104,8 @@ function App() {
       {page === 'Calendar' && <Calendar {...{ data, year, monthNumber, setMonth }} onDay={date => setModal({ type: 'day', date })}/>}
       {page === 'Work Logs' && <Logs {...{ data, month, search, setSearch }} onAdd={canEdit ? () => openLog() : undefined} onEdit={canEdit ? l => openLog(l.date, l) : undefined} onDelete={canEdit ? l => remove('logs', l) : undefined} onDuplicate={canEdit ? duplicate : undefined}/>}
       {page === 'Reports' && <Reports {...{ data, month }}/>} 
-      {page === 'User Management' && isAdmin && <UserManagement currentUser={user} onUserUpdate={setUser}/>}
-      {page === 'Settings' && isAdmin && <Settings {...{ user, theme, setTheme }} onUserUpdate={setUser} onHelp={() => setModal({ type: 'help' })}/>}
+      {page === 'Workspace Members' && isAdmin && <WorkspaceMembers/>}
+      {page === 'Settings' && isAdmin && <Settings {...{ user, theme, setTheme }} onUserUpdate={handleAuth} onHelp={() => setModal({ type: 'help' })}/>}
       <footer><span><span className="status-dot"/> A little more clarity. A little more progress.</span><span>Made for meaningful work.</span></footer>
     </main></div>
     {toast && <div className="toast" role="status"><Check size={17}/>{toast}</div>}
@@ -86,31 +118,6 @@ function App() {
       {modal.type === 'help' && <div className="help-content"><p>Tempo brings the time you spend on your websites into one calm workspace.</p><ol><li><strong>Add your websites</strong><p>Set a start date and default monthly allocation for each project.</p></li><li><strong>Make time visible</strong><p>Log work from any calendar day. Use hours and minutes, categories, and notes.</p></li><li><strong>Keep an eye on progress</strong><p>Choose a month to compare your work with your targets. Set individual monthly overrides from My Websites.</p></li><li><strong>Take your data with you</strong><p>Export filtered reports to CSV or Excel, or download a complete JSON backup in Settings.</p></li></ol></div>}
     </Modal>}
   </div>;
-}
-
-function Auth({ onAuth, initialError }) {
-  const [mode, setMode] = useState('login'), [error, setError] = useState(initialError), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false), [setup, setSetup] = useState(null);
-  useEffect(() => { api('/auth/setup-status').then(setSetup).catch(() => setSetup(null)); }, []);
-  async function submit(e) {
-    e.preventDefault(); setBusy(true); setError(''); setNotice('');
-    const form = new FormData(e.currentTarget), email = form.get('email');
-    try {
-      if (mode === 'login') onAuth(await api('/auth/login', { method: 'POST', body: JSON.stringify({ email, password: form.get('password') }) }));
-      else if (mode === 'forgot') { await api('/auth/forgot-password', { method: 'POST', body: JSON.stringify({ email }) }); setNotice('If an active account matches that email, a recovery code will be sent.'); setMode('reset'); }
-      else if (mode === 'reset') {
-        if (form.get('password') !== form.get('confirmPassword')) throw new Error('Passwords do not match.');
-        await api('/auth/reset-password', { method: 'POST', body: JSON.stringify({ email, code: form.get('code'), password: form.get('password') }) });
-        setNotice('Password updated. Sign in with your new password.'); setMode('login');
-      } else {
-        if (form.get('password') !== form.get('confirmPassword')) throw new Error('Passwords do not match.');
-        const user = await api('/auth/bootstrap', { method: 'POST', headers: { 'X-Admin-Bootstrap-Token': form.get('bootstrapToken') }, body: JSON.stringify({ name: form.get('name'), email, password: form.get('password') }) });
-        setSetup({ needsOwner: false, bootstrapEnabled: false }); onAuth(user);
-      }
-    } catch (requestError) { setError(requestError.message); }
-    finally { setBusy(false); }
-  }
-  const isBootstrap = mode === 'bootstrap', isReset = mode === 'reset';
-  return <div className="auth-layout"><div className="auth-story"><a className="brand"><span className="brand-mark">t<span>•</span></span>tempo</a><div><span className="eyebrow">A LITTLE PROGRESS, EVERY DAY</span><h1>Good work<br/>deserves<br/><em>a little clarity.</em></h1><p>One considered workspace for your websites,<br/>your hours, and everything moving forward.</p><div className="auth-art"><div className="art-orbit orbit-one"/><div className="art-orbit orbit-two"/><div className="art-clock"><Clock3 size={65} strokeWidth={1}/></div><span className="art-label"><span className="status-dot"/> Time, well spent.</span></div></div><small>WEBSITE WORK HOURS TRACKER</small></div><div className="auth-form-wrap"><form className="auth-form" onSubmit={submit}><span className="eyebrow">{isBootstrap ? 'SECURE OWNER SETUP' : 'YOUR PERSONAL WORKSPACE'}</span><h2>{isBootstrap ? 'Set up the owner.' : isReset ? 'Reset your password.' : mode === 'forgot' ? 'Recover your account.' : 'Welcome back.'}</h2><p>{isBootstrap ? 'Use the one-time setup token configured by the server.' : isReset ? 'Enter the code from your email and choose a new password.' : mode === 'forgot' ? 'We’ll email a short-lived recovery code if the account is active.' : 'Sign in to your workspace.'}</p>{error && <div className="alert error" role="alert">{error}</div>}{notice && <div className="alert" role="status">{notice}</div>}{isBootstrap && <><label>Full name<input name="name" autoComplete="name" maxLength={100} required placeholder="Alex Morgan"/></label><label>One-time setup token<input name="bootstrapToken" type="password" autoComplete="off" required/></label></>}<label>{mode === 'login' ? 'Email or Login ID' : 'Email address'}<input name="email" type={mode === 'login' ? 'text' : 'email'} autoComplete="username" required placeholder="you@example.com"/></label>{isReset && <><label>Recovery code<input name="code" inputMode="numeric" autoComplete="one-time-code" pattern="[0-9]{8}" maxLength={8} required/></label><label>New password<input name="password" type="password" autoComplete="new-password" minLength={12} maxLength={128} required placeholder="At least 12 characters"/></label><label>Confirm password<input name="confirmPassword" type="password" autoComplete="new-password" minLength={12} maxLength={128} required/></label></>}{(mode === 'login' || isBootstrap) && <label>{isBootstrap ? 'Password' : 'Password'}<input name="password" type="password" autoComplete={isBootstrap ? 'new-password' : 'current-password'} minLength={isBootstrap ? 12 : 10} maxLength={128} required placeholder={isBootstrap ? 'At least 12 characters' : 'Your password'}/></label>}{isBootstrap && <label>Confirm password<input name="confirmPassword" type="password" autoComplete="new-password" minLength={12} maxLength={128} required/></label>}<button className="button primary full-width" disabled={busy}>{busy ? 'Please wait…' : isBootstrap ? 'Create primary Admin' : isReset ? 'Update password' : mode === 'forgot' ? 'Send recovery code' : 'Sign in'}<ArrowRight size={17}/></button>{mode === 'login' && <button className="text-button auth-secondary-action" type="button" onClick={() => { setMode('forgot'); setError(''); setNotice(''); }}>Forgot Password?</button>}{mode !== 'login' && !isBootstrap && <button className="text-button auth-secondary-action" type="button" onClick={() => { setMode('login'); setError(''); setNotice(''); }}>Back to sign in</button>}{setup?.needsOwner && setup.bootstrapEnabled && mode === 'login' && <button className="text-button auth-secondary-action" type="button" onClick={() => { setMode('bootstrap'); setError(''); setNotice(''); }}>Set up primary Admin</button>}{setup?.needsOwner && !setup.bootstrapEnabled && mode === 'login' && <p className="auth-footnote">Owner setup is not enabled. Configure ADMIN_BOOTSTRAP_TOKEN on the server.</p>}<div className="auth-footnote"><Check size={14}/> Your work. Your data. Your workspace.</div></form></div></div>;
 }
 
 function PasswordChange({ onComplete }) {
@@ -216,76 +223,7 @@ function Reports({ data, month }) {
   return <><div className="toolbar reports-toolbar"><select aria-label="Report period" value={period} onChange={e => setPeriod(e.target.value)}>{['Daily', 'Weekly', 'Monthly', 'Yearly', 'Custom'].map(p => <option key={p}>{p}</option>)}</select><input type="date" aria-label="Start date" value={from} max={to} onChange={e => { setPeriod('Custom'); setFrom(e.target.value); }}/><span className="muted">to</span><input type="date" aria-label="End date" value={to} min={from} onChange={e => { setPeriod('Custom'); setTo(e.target.value); }}/><select aria-label="Report website" value={websiteId} onChange={e => setWebsite(e.target.value)}><option value="">All websites</option>{data.websites.map(w => <option key={w.id} value={w.id}>{w.name}</option>)}</select><select aria-label="Report category" value={category} onChange={e => setCategory(e.target.value)}><option value="">All categories</option>{categories.map(c => <option key={c}>{c}</option>)}</select></div><div className="report-summary"><div className="panel"><small>TOTAL TIME</small><strong>{duration(total)}</strong></div><div className="panel"><small>WORK ENTRIES</small><strong>{logs.length}</strong></div><div className="panel"><small>ACTIVE DAYS</small><strong>{days}</strong></div><div className="panel"><small>AVERAGE / ACTIVE DAY</small><strong>{duration(days ? total / days : 0)}</strong></div></div><section className="panel report-chart"><div className="panel-heading"><div><h2>Where your time goes</h2><p>Hours worked, grouped by {group.toLowerCase()}.</p></div><select aria-label="Group report by" value={group} onChange={e => setGroup(e.target.value)}>{['Website', 'Category', 'Day'].map(v => <option key={v}>{v}</option>)}</select></div>{chart.length ? <div className="report-chart-container"><ResponsiveContainer width="100%" height="100%"><BarChart data={chart} margin={{ left: -20, right: 20, bottom: 20 }}><CartesianGrid strokeDasharray="3 4" vertical={false} stroke="var(--border)"/><XAxis dataKey="name" tick={{ fontSize: 11, fill: 'var(--muted)' }} interval={0} tickFormatter={v => v.length > 18 ? v.slice(0, 16) + '…' : v}/><YAxis tick={{ fontSize: 11, fill: 'var(--muted)' }}/><Tooltip contentStyle={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 8 }} formatter={v => [`${v} hours`, 'Work time']}/><Bar isAnimationActive={false} dataKey="hours" radius={[5, 5, 0, 0]} maxBarSize={65}>{chart.map((v, i) => <Cell key={v.name} fill={COLORS[i % COLORS.length]}/>)}</Bar></BarChart></ResponsiveContainer></div> : <Empty icon={ChartNoAxesCombined} title="Your story is still taking shape" text="Work logged in this date range will appear here."/>}</section><section className="panel report-table"><div className="panel-heading"><div><h2>Work report</h2><p>{logs.length} entries · {from || 'All dates'} — {to || 'Today'}</p></div><div className="export-actions">{['csv', 'xlsx'].map(format => <button key={format} className="button secondary" onClick={() => download(`/export/${format}?${new URLSearchParams(filters)}`)}><ArrowDownToLine size={15}/>{format === 'csv' ? 'CSV' : 'Excel'}</button>)}</div></div>{logs.length ? <LogTable {...{ logs, data }}/> : <p className="no-rows">No entries match these filters.</p>}</section></>;
 }
 
-function CredentialCard({ value, onDismiss }) {
-  const [copied, setCopied] = useState(false), [error, setError] = useState('');
-  const { user, password } = value;
-  const loginUrl = window.location.origin;
-  const text = ['Name: ' + user.name, 'Email: ' + user.email, 'Login ID: ' + (user.username || user.email), 'Role: ' + user.role, 'Temporary password: ' + password, 'Login URL: ' + loginUrl, 'Change your password at first sign-in.'].join('\n');
-  return <section className="panel credentials-card"><h2>Account credentials</h2><p className="muted">Shown once. Copy these details before dismissing or leaving this page.</p><dl><dt>Name</dt><dd>{user.name}</dd><dt>Login ID / Email</dt><dd>{user.username || user.email} / {user.email}</dd><dt>Assigned role</dt><dd>{user.role}</dd><dt>Temporary password</dt><dd><code>{password}</code></dd><dt>Login URL</dt><dd>{loginUrl}</dd></dl><FormError error={error}/><button className="button primary" onClick={async () => { try { await navigator.clipboard.writeText(text); setCopied(true); } catch { setError('Copy is unavailable. Select the displayed details and copy them manually.'); } }}>{copied ? 'Copied' : 'Copy Credentials'}</button><button className="button secondary" onClick={onDismiss}>Dismiss credentials</button></section>;
-}
-
-function OwnerSetup({ onComplete }) {
-  const [setup, setSetup] = useState(null), [error, setError] = useState(''), [busy, setBusy] = useState(false);
-  useEffect(() => { api('/auth/setup-status').then(setSetup).catch(() => {}); }, []);
-  if (!setup?.needsOwner) return null;
-  return <form className="panel owner-setup form" onSubmit={async event => { event.preventDefault(); setBusy(true); setError(''); const token = new FormData(event.currentTarget).get('token'); try { onComplete(await api('/auth/claim-owner', { method: 'POST', headers: { 'X-Admin-Bootstrap-Token': token } })); } catch (e) { setError(e.message); } finally { setBusy(false); } }}><h2>Enable owner access for your existing account</h2><p className="muted">Your existing login and work history are preserved. Verify ownership using the server's one-time ADMIN_BOOTSTRAP_TOKEN to unlock User Management.</p><FormError error={error}/>{setup.bootstrapEnabled ? <><label>One-time owner token<input name="token" type="password" autoComplete="off" required/></label><button className="button primary" disabled={busy}>Enable User Management</button></> : <p className="muted">Owner verification needs ADMIN_BOOTSTRAP_TOKEN configured on the server first.</p>}</form>;
-}
-
-function UserManagement({ currentUser, onUserUpdate }) {
-  const [users, setUsers] = useState([]), [query, setQuery] = useState(''), [showAudit, setShowAudit] = useState(false), [audit, setAudit] = useState([]);
-  const [loading, setLoading] = useState(true), [busy, setBusy] = useState(false), [error, setError] = useState(''), [notice, setNotice] = useState(''), [modal, setModal] = useState(null), [credentials, setCredentials] = useState(null), [roleFilter, setRoleFilter] = useState('');
-  const loadUsers = async () => { setLoading(true); try { setUsers(await api('/users')); setError(''); } catch (requestError) { setError(requestError.message); } finally { setLoading(false); } };
-  const loadAudit = async () => { setBusy(true); try { setAudit(await api('/audit-logs?limit=250')); setShowAudit(true); } catch (requestError) { setError(requestError.message); } finally { setBusy(false); } };
-  useEffect(() => { loadUsers(); }, []);
-  const filtered = users.filter(account => !roleFilter || (account.isPrimaryAdmin ? 'owner' : account.role) === roleFilter).filter(account => `${account.name} ${account.email} ${account.username || ''}`.toLowerCase().includes(query.toLowerCase()));
-  async function saveUser(value) {
-    setBusy(true); setError('');
-    try { const saved = await api(modal.value ? `/users/${modal.value.id}` : '/users', { method: modal.value ? 'PUT' : 'POST', body: JSON.stringify(value) }); if (saved.id === currentUser.id) onUserUpdate(saved); if (!modal.value) setCredentials({ user: saved, password: value.password }); setNotice(modal.value ? 'User details updated.' : saved.invitationSent ? 'Account created and invitation emailed.' : value.sendInvitation ? 'Account created. Email was not sent; share the credentials below.' : 'Account created. Share the credentials below.'); setModal(null); await loadUsers(); }
-    catch (requestError) { setError(requestError.message); throw requestError; }
-    finally { setBusy(false); }
-  }
-  async function updateStatus(account) {
-    setBusy(true); setError('');
-    try { await api(`/users/${account.id}`, { method: 'PUT', body: JSON.stringify({ status: account.status === 'active' ? 'inactive' : 'active' }) }); setNotice(`Account ${account.status === 'active' ? 'deactivated' : 'reactivated'}.`); await loadUsers(); }
-    catch (requestError) { setError(requestError.message); }
-    finally { setBusy(false); }
-  }
-  async function resetPassword(account) {
-    setBusy(true); setError('');
-    try { const result = await api(`/users/${account.id}/reset-password`, { method: 'POST' }); setCredentials({ user: result.user, password: result.temporaryPassword }); setNotice(result.invitationSent ? 'Temporary password emailed.' : 'Temporary password created. Share it securely.'); }
-    catch (requestError) { setError(requestError.message); }
-    finally { setBusy(false); }
-  }
-  async function deleteUser(account) {
-    setBusy(true); setError('');
-    try { await api(`/users/${account.id}`, { method: 'DELETE' }); setModal(null); setNotice('User deleted.'); await loadUsers(); }
-    catch (requestError) { setError(requestError.message); }
-    finally { setBusy(false); }
-  }
-  return <>
-    <div className="toolbar user-management-toolbar"><label className="search-box"><Search size={16}/><input aria-label="Search users" placeholder="Search name or email…" value={query} onChange={event => setQuery(event.target.value)}/></label><select aria-label="Filter user role" value={roleFilter} onChange={event => setRoleFilter(event.target.value)}><option value="">All roles</option><option value="owner">Owner</option><option value="editor">Editor</option><option value="viewer">Viewer</option></select><span className="muted toolbar-count">{filtered.length} users</span><button className="button secondary" onClick={() => showAudit ? setShowAudit(false) : loadAudit()} disabled={busy}><Activity size={15}/>{showAudit ? 'Users' : 'Audit log'}</button><button className="button primary" onClick={() => { setError(''); setModal({ type: 'user' }); }}><Plus size={16}/>Add New User</button></div>
-    {error && <div className="alert error" role="alert">{error}<button className="icon-button" aria-label="Dismiss user-management error" onClick={() => setError('')}><X size={15}/></button></div>}
-    {notice && <div className="alert user-notice" role="status">{notice}<button className="icon-button" aria-label="Dismiss notice" onClick={() => setNotice('')}><X size={15}/></button></div>}
-    {credentials && <CredentialCard value={credentials} onDismiss={() => setCredentials(null)}/>}
-    {showAudit ? <section className="panel user-table-panel"><div className="panel-heading"><div><h2>Activity log</h2><p>Recent account and workspace changes.</p></div></div>{!audit.length ? <p className="no-rows">No audit activity yet.</p> : <div className="table-scroll"><table><thead><tr><th>Date and time</th><th>User</th><th>Role</th><th>Action</th><th>Affected record</th><th>Details</th></tr></thead><tbody>{audit.map(entry => <tr key={entry.id}><td className="nowrap">{formatDateTime(entry.createdAt)}</td><td>{entry.userName}</td><td><RoleBadge role={entry.userRole}/></td><td>{entry.action}</td><td>{entry.resourceType}{entry.resourceId ? ` · ${entry.resourceId}` : ''}</td><td>{Object.keys(entry.details || {}).length ? JSON.stringify(entry.details) : '—'}</td></tr>)}</tbody></table></div>}</section> : <section className="panel user-table-panel">{loading ? <div className="loading-line" role="status">Loading users…</div> : !filtered.length ? <p className="no-rows">{users.length ? 'No users match that search.' : 'No user accounts found.'}</p> : <div className="table-scroll"><table><thead><tr><th>User Name</th><th>Email Address</th><th>Login ID</th><th>Assigned Role</th><th>Account Status</th><th>Created Date</th><th>Last Login</th><th>Actions</th></tr></thead><tbody>{filtered.map(account => <tr key={account.id}><td><strong>{account.name}</strong>{account.username && <small className="user-username">@{account.username}</small>}</td><td>{account.email}</td><td>{account.username || account.email}</td><td><RoleBadge role={account.isPrimaryAdmin ? 'owner' : account.role}/>{account.isPrimaryAdmin && <small className="owner-label">Primary owner</small>}</td><td><span className={`user-status ${account.status}`}>{account.status}</span></td><td className="nowrap">{formatDateTime(account.createdAt, false)}</td><td className="nowrap">{formatDateTime(account.lastLogin, false)}</td><td><div className="user-actions"><button className="icon-button" title="Edit user" aria-label={`Edit ${account.name}`} disabled={busy || (account.isPrimaryAdmin && !currentUser.isPrimaryAdmin)} onClick={() => { setError(''); setModal({ type: 'user', value: account }); }}><Pencil size={15}/></button>{!account.isPrimaryAdmin && account.id !== currentUser.id && <><button className="icon-button" title={account.status === 'active' ? 'Deactivate user' : 'Reactivate user'} aria-label={`${account.status === 'active' ? 'Deactivate' : 'Reactivate'} ${account.name}`} disabled={busy} onClick={() => updateStatus(account)}><Activity size={15}/></button><button className="icon-button" title="Send temporary password" aria-label={`Reset password for ${account.name}`} disabled={busy} onClick={() => resetPassword(account)}><KeyRound size={15}/></button><button className="icon-button danger-text" title="Delete user" aria-label={`Delete ${account.name}`} disabled={busy} onClick={() => setModal({ type: 'delete', value: account })}><Trash2 size={15}/></button></>}</div></td></tr>)}</tbody></table></div>}</section>}
-    {modal && <Modal title={modal.type === 'delete' ? 'Delete user?' : modal.value ? 'Edit user' : 'Add new user'} onClose={() => !busy && setModal(null)}>{modal.type === 'delete' ? <DeleteForm busy={busy} text={`Delete ${modal.value.name} (${modal.value.email})? They will lose access immediately.`} onConfirm={() => deleteUser(modal.value)}/> : <UserForm value={modal.value} busy={busy} onSave={saveUser}/>}</Modal>}
-  </>;
-}
-
-function RoleBadge({ role }) { const Icon = ['admin', 'owner'].includes(role) ? ShieldCheck : role === 'viewer' ? Eye : Users; return <span className={`role-badge role-${role}`}><Icon size={13}/>{role[0].toUpperCase() + role.slice(1)}</span>; }
-function formatDateTime(value, includeTime = true) { return value ? new Date(value).toLocaleString('en', includeTime ? { dateStyle: 'medium', timeStyle: 'short' } : { dateStyle: 'medium' }) : 'Never'; }
-function UserForm({ value, busy, onSave }) {
-  const [error, setError] = useState('');
-  return <form className="form" onSubmit={async event => { event.preventDefault(); const form = new FormData(event.currentTarget); const password = form.get('password'); if (!value && password !== form.get('confirmPassword')) { setError('Passwords do not match.'); return; } const data = { name: form.get('name'), email: form.get('email'), username: form.get('username') }; const role = form.get('role'), status = form.get('status'); if (role) data.role = role; if (status) data.status = status; if (!value) { data.password = password; data.sendInvitation = form.get('sendInvitation') === 'on'; } try { setError(''); await onSave(data); } catch (requestError) { setError(requestError.message); } }}>
-    <FormError error={error}/><label>Full name<input name="name" defaultValue={value?.name} autoComplete="name" maxLength={100} required/></label><label>Email address<input name="email" type="email" defaultValue={value?.email} autoComplete="email" maxLength={254} required/></label><label>Username <span className="muted">(optional)</span><input name="username" defaultValue={value?.username || ''} autoComplete="username" maxLength={40}/></label>
-    {!value && <><label>Temporary password<input name="password" type="password" autoComplete="new-password" minLength={12} maxLength={128} required/></label><label>Confirm password<input name="confirmPassword" type="password" autoComplete="new-password" minLength={12} maxLength={128} required/></label><p className="muted">The user will be required to change this password at first sign-in.</p></>}
-    <div className="form-columns"><label>Role<select name="role" defaultValue={value?.role || 'editor'} disabled={value?.isPrimaryAdmin}>{(value?.isPrimaryAdmin ? ['admin'] : ['editor', 'viewer']).map(role => <option key={role} value={role}>{role[0].toUpperCase() + role.slice(1)}</option>)}</select></label><label>Account status<select name="status" defaultValue={value?.status || 'active'} disabled={value?.isPrimaryAdmin}><option value="active">Active</option><option value="inactive">Inactive</option></select></label></div>
-    {!value && <label className="invitation-option"><input type="checkbox" name="sendInvitation"/>Send invitation email (optional)</label>}
-    {value?.isPrimaryAdmin && <p className="muted">The primary owner cannot be downgraded or deactivated.</p>}<button className="button primary full-width" disabled={busy}>{busy ? 'Saving…' : value ? 'Save user' : 'Create account'}<Check size={16}/></button>
-  </form>;
-}
-
-function Settings({ user, theme, setTheme, onHelp, onUserUpdate }) { return <div className="settings-grid"><section className="panel settings-card"><h2>Your workspace</h2><p className="muted">A personal space for thoughtful work.</p><div className="settings-row"><span>Name</span><strong>{user.name}</strong></div><div className="settings-row"><span>Email</span><strong>{user.email}</strong></div><div className="settings-row"><span>Appearance</span><div className="segmented">{['light', 'dark'].map(t => <button key={t} className={theme === t ? 'selected' : ''} onClick={() => setTheme(t)}>{t === 'light' ? <Sun size={14}/> : <Moon size={14}/>}{t[0].toUpperCase() + t.slice(1)}</button>)}</div></div></section><section className="panel settings-card"><AccountPasswordForm onComplete={onUserUpdate}/><div className="settings-divider"/><h2>Your data, on your terms.</h2><p className="muted">Download all your websites, work logs, and monthly allocations as a JSON backup. Account passwords are never included.</p><button className="button secondary" onClick={() => download('/backup')}><ArrowDownToLine size={16}/>Download full backup</button><div className="settings-divider"/><h2>A little guidance</h2><p className="muted">Find your way around your workspace.</p><button className="text-button" onClick={onHelp}>Getting started with Tempo <ArrowUpRight size={15}/></button></section></div>; }
+function Settings({ user, theme, setTheme, onHelp, onUserUpdate }) { return <div className="settings-grid"><section className="panel settings-card"><h2>Your workspace</h2><WorkspaceNameForm user={user} onUpdate={onUserUpdate}/><p className="muted">Your role applies to this workspace.</p><div className="settings-row"><span>Name</span><strong>{user.name}</strong></div><div className="settings-row"><span>Email</span><strong>{user.email}</strong></div><div className="settings-row"><span>Appearance</span><div className="segmented">{['light', 'dark'].map(t => <button key={t} className={theme === t ? 'selected' : ''} onClick={() => setTheme(t)}>{t === 'light' ? <Sun size={14}/> : <Moon size={14}/>}{t[0].toUpperCase() + t.slice(1)}</button>)}</div></div></section><section className="panel settings-card"><AccountPasswordForm onComplete={onUserUpdate}/><div className="settings-divider"/><h2>Your data, on your terms.</h2><p className="muted">Download all your websites, work logs, and monthly allocations as a JSON backup. Account passwords are never included.</p><button className="button secondary" onClick={() => download('/backup')}><ArrowDownToLine size={16}/>Download full backup</button><div className="settings-divider"/><h2>A little guidance</h2><p className="muted">Find your way around your workspace.</p><button className="text-button" onClick={onHelp}>Getting started with Tempo <ArrowUpRight size={15}/></button></section></div>; }
 
 function AccountPasswordForm({ onComplete }) {
   const [error, setError] = useState(''), [notice, setNotice] = useState(''), [busy, setBusy] = useState(false);
