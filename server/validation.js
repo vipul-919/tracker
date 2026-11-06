@@ -8,3 +8,24 @@ export const logInput = z.object({ websiteId: id, date, description: text(2000),
 export const allocationInput = z.object({ websiteId: id, month: z.number().int().min(1).max(12), year: z.number().int().min(1900).max(2200), allocatedHours: z.number().min(0).max(744).refine(v => Number.isInteger(v * 60), 'Use whole minutes') });
 export const credentials = z.object({ email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), password: z.string().min(10).max(128) });
 export const registration = credentials.extend({ name: text(100) });
+const email = z.string().trim().email().max(254).transform(value => value.toLowerCase());
+const username = z.string().trim().max(40).regex(/^[a-zA-Z0-9._-]*$/).transform(value => value.toLowerCase() || undefined).optional();
+export const bootstrapInput = z.object({ name: text(100), email, password: z.string().min(12).max(128) });
+export const managedUserInput = z.object({
+	name: text(100),
+	email,
+	username,
+	password: z.string().min(12).max(128),
+	role: z.enum(['admin', 'editor', 'viewer']),
+	status: z.enum(['active', 'inactive']),
+});
+export const managedUserUpdateInput = z.object({
+	name: text(100).optional(),
+	email: email.optional(),
+	username,
+	role: z.enum(['admin', 'editor', 'viewer']).optional(),
+	status: z.enum(['active', 'inactive']).optional(),
+}).refine(value => Object.keys(value).length > 0, 'Provide at least one user field to update');
+export const passwordChangeInput = z.object({ currentPassword: z.string().min(1).max(128).optional(), newPassword: z.string().min(12).max(128) });
+export const forgotPasswordInput = z.object({ email });
+export const resetPasswordInput = z.object({ email, code: z.string().regex(/^\d{8}$/), password: z.string().min(12).max(128) });

@@ -3,8 +3,14 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "engines": { "node": "24.x" },
-  "config": { "mongodbMemoryServer": { "disablePostinstall": true } },
+  "engines": {
+    "node": "24.x"
+  },
+  "config": {
+    "mongodbMemoryServer": {
+      "disablePostinstall": true
+    }
+  },
   "scripts": {
     "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
     "dev:server": "node --watch --env-file=.env server/index.js",
@@ -16,7 +22,11 @@
     "setup": "node scripts/setup.js",
     "test:browser": "node scripts/browser-check.js"
   },
-  "overrides": { "exceljs": { "uuid": "^11.1.1" } },
+  "overrides": {
+    "exceljs": {
+      "uuid": "^11.1.1"
+    }
+  },
   "dependencies": {
     "bcryptjs": "^3.0.2",
     "cookie-parser": "^1.4.7",
@@ -28,6 +38,7 @@
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.468.0",
     "mongoose": "^8.19.1",
+    "nodemailer": "^10.3.1",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "recharts": "^3.2.1",
