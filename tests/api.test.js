@@ -47,3 +47,68 @@ test('authentication, validation, authorization and complete CRUD with real Mong
   await owner.post('/api/auth/login').set(...header).send({ email: 'alex@example.com', password: 'wrong-password' }).expect(401);
   await owner.post('/api/auth/login').set(...header).send({ email: 'alex@example.com', password: 'strong-test-password' }).expect(200);
 });
+
+test('individual and combined exports include complete historical work history', async () => {
+  const account = request.agent(app);
+  await account.post('/api/auth/register').set(...header).send({ name: 'Export user', email: 'exports@example.com', password: 'strong-export-password' }).expect(200);
+  const siteA = (await account.post('/api/websites').set(...header).send({ ...website, name: 'Website A', url: 'https://a.example.com', startDate: '2020-01-01' }).expect(201)).body;
+  const siteB = (await account.post('/api/websites').set(...header).send({ ...website, name: 'Website B', url: 'https://b.example.com', startDate: '2020-01-01' }).expect(201)).body;
+  const emptySite = (await account.post('/api/websites').set(...header).send({ ...website, name: 'Empty', url: 'https://empty.example.com' }).expect(201)).body;
+  const first = (await account.post('/api/logs').set(...header).send({ websiteId: siteA.id, date: '2020-04-03', description: 'Quoted, "work"', category: 'Design', hours: 1, minutes: 5, notes: 'Line one,\nline two' }).expect(201)).body;
+  await account.post('/api/logs').set(...header).send({ websiteId: siteA.id, date: '2026-03-20', description: 'Recent work', category: 'Development', hours: 2, minutes: 0, notes: 'Current project' }).expect(201);
+  await account.post('/api/logs').set(...header).send({ websiteId: siteB.id, date: '2021-08-09', description: 'Separate project', category: 'Maintenance', hours: 1, minutes: 30, notes: '' }).expect(201);
+
+  await request(app).get(`/api/websites/${siteA.id}/export/csv`).expect(401);
+  await account.get('/api/websites/not-a-mongo-id/export/csv').expect(400);
+  await other.get(`/api/websites/${siteA.id}/export/csv`).expect(404);
+
+  const siteCsv = await account.get(`/api/websites/${siteA.id}/export/csv`).expect(200);
+  assert.match(siteCsv.headers['content-disposition'], /Website-A-Work-Report\.csv/);
+  assert.match(siteCsv.headers['content-type'], /text\/csv; charset=utf-8/);
+  assert.match(siteCsv.text, /Website Name/);
+  assert.match(siteCsv.text, /https:\/\/a\.example\.com/);
+  assert.match(siteCsv.text, /"Quoted, ""work"""/);
+  assert.match(siteCsv.text, /Line one,\nline two/);
+  assert.doesNotMatch(siteCsv.text, /Website B|b\.example\.com|Separate project/);
+  assert.ok(siteCsv.text.indexOf('2020-04-03') < siteCsv.text.indexOf('2026-03-20'));
+
+  const siteXlsx = await account.get(`/api/websites/${siteA.id}/export/xlsx`).buffer(true).parse((res, cb) => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => cb(null, Buffer.concat(chunks))); }).expect(200);
+  assert.match(siteXlsx.headers['content-disposition'], /Website-A-Work-Report\.xlsx/);
+  const individualWorkbook = new ExcelJS.Workbook();
+  await individualWorkbook.xlsx.load(siteXlsx.body);
+  const history = individualWorkbook.getWorksheet('Work History');
+  assert.equal(history.rowCount, 3);
+  assert.deepEqual(history.getRow(1).values.slice(1), ['Date', 'Website Name', 'Website URL', 'Work Description', 'Work Category', 'Hours', 'Minutes', 'Total Time', 'Notes', 'Created At']);
+  assert.equal(history.getRow(2).getCell(1).value, '2020-04-03');
+  assert.equal(history.getRow(2).getCell(2).value, 'Website A');
+  assert.equal(history.getRow(2).getCell(3).value, 'https://a.example.com');
+  assert.equal(history.getRow(2).getCell(4).value, 'Quoted, "work"');
+  assert.equal(history.getRow(2).getCell(8).value, '1h 5m');
+  assert.equal(history.getRow(2).getCell(9).value, 'Line one,\nline two');
+  assert.equal(history.getRow(2).getCell(10).value, first.createdAt);
+
+  const allCsv = await account.get('/api/export/all/csv').expect(200);
+  assert.match(allCsv.text, /Website A/);
+  assert.match(allCsv.text, /Website B/);
+  assert.match(allCsv.text, /https:\/\/b\.example\.com/);
+  assert.ok(allCsv.text.indexOf('2020-04-03') < allCsv.text.indexOf('2021-08-09'));
+  assert.ok(allCsv.text.indexOf('2021-08-09') < allCsv.text.indexOf('2026-03-20'));
+
+  const allXlsx = await account.get('/api/export/all/xlsx').buffer(true).parse((res, cb) => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => cb(null, Buffer.concat(chunks))); }).expect(200);
+  assert.match(allXlsx.headers['content-disposition'], /All-Projects-Work-Report\.xlsx/);
+  const combinedWorkbook = new ExcelJS.Workbook();
+  await combinedWorkbook.xlsx.load(allXlsx.body);
+  assert.deepEqual(combinedWorkbook.worksheets.map(sheet => sheet.name), ['Summary', 'Empty', 'Website A', 'Website B', 'All Work Logs']);
+  assert.equal(combinedWorkbook.getWorksheet('Website A').rowCount, 3);
+  assert.equal(combinedWorkbook.getWorksheet('Website B').rowCount, 2);
+  assert.equal(combinedWorkbook.getWorksheet('Empty').rowCount, 1);
+  assert.equal(combinedWorkbook.getWorksheet('All Work Logs').rowCount, 4);
+  assert.equal(combinedWorkbook.getWorksheet('Summary').getRow(2).getCell(3).value, 0);
+
+  const emptyCsv = await account.get(`/api/websites/${emptySite.id}/export/csv`).expect(200);
+  assert.equal(emptyCsv.text.split('\r\n').length, 1);
+  const emptyXlsx = await account.get(`/api/websites/${emptySite.id}/export/xlsx`).buffer(true).parse((res, cb) => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => cb(null, Buffer.concat(chunks))); }).expect(200);
+  const emptyWorkbook = new ExcelJS.Workbook();
+  await emptyWorkbook.xlsx.load(emptyXlsx.body);
+  assert.equal(emptyWorkbook.worksheets[0].rowCount, 1);
+});

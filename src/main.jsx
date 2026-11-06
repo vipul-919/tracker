@@ -18,6 +18,7 @@ function App() {
   const [page, setPage] = useState('Dashboard'), [month, setMonth] = useState(dateKey().slice(0, 7));
   const [theme, setTheme] = useState(localStorage.getItem('tempo-theme') || 'light'), [sidebar, setSidebar] = useState(false);
   const [modal, setModal] = useState(null), [busy, setBusy] = useState(false), [loading, setLoading] = useState(false), [error, setError] = useState(''), [toast, setToast] = useState('');
+  const [exporting, setExporting] = useState(false), [exportError, setExportError] = useState('');
   const [search, setSearch] = useState('');
   const [year, monthNumber] = month.split('-').map(Number);
   const refresh = async () => { setLoading(true); try { setData(await api('/data')); setError(''); } catch (e) { setError(e.message); if (e.status === 401) setUser(null); } finally { setLoading(false); } };
@@ -25,9 +26,11 @@ function App() {
   useEffect(() => { if (user) refresh(); }, [user]);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('tempo-theme', theme); }, [theme]);
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(''), 4000); return () => clearTimeout(timer); } }, [toast]);
+  useEffect(() => { const onDownloadError = event => setExportError(event.detail); window.addEventListener('tempo-download-error', onDownloadError); return () => window.removeEventListener('tempo-download-error', onDownloadError); }, []);
   const stats = useMemo(() => monthlyStats(data.websites, data.logs, data.allocations, year, monthNumber), [data, year, monthNumber]);
   const notify = (s) => setToast(s);
   const mutate = async (path, method, body, message) => { setBusy(true); try { await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) }); await refresh(); setModal(null); notify(message); } finally { setBusy(false); } };
+  const exportFile = async (path, label) => { setExportError(''); setExporting(true); try { if (await download(path)) notify(`${label} downloaded`); } catch (e) { setExportError(e.message || 'The export could not be downloaded. Please try again.'); } finally { setExporting(false); } };
   const openLog = (date = dateKey(), log = null) => { if (!data.websites.length) { setModal({ type: 'website' }); notify('Add your first website to start tracking.'); } else setModal({ type: 'log', date, value: log }); };
   const changePage = (p) => { setPage(p); setSearch(''); setSidebar(false); };
   const remove = (kind, value) => setModal({ type: 'delete', kind, value });
@@ -47,9 +50,19 @@ function App() {
     <main>
       <div className="page-heading"><div><div className="eyebrow">YOUR TIME, WELL SPENT</div><h1>{page === 'Dashboard' ? 'A clear view of your work.' : page}</h1><p>{({ Dashboard: 'Every website. Every hour. All moving forward.', 'My Websites': 'A home for every website you look after.', Calendar: 'See the rhythm of your work, one day at a time.', 'Work Logs': 'The small steps behind your bigger progress.', Reports: 'Turn your working hours into a clearer picture.', Settings: 'Make this workspace feel like yours.' })[page]}</p></div><div className="heading-actions">{page !== 'Settings' && <label className="month-picker"><CalendarDays size={16}/><input aria-label="Selected month" type="month" min="1900-01" max="2200-12" value={month} onChange={e => e.target.value && setMonth(e.target.value)}/></label>}<button className="button primary" onClick={() => page === 'My Websites' ? setModal({ type: 'website' }) : openLog()}><Plus size={17}/>{page === 'My Websites' ? 'Add website' : 'Log work'}</button></div></div>
       {error && <div className="alert error">{error}<button onClick={refresh}>Try again</button><button className="icon-button" aria-label="Dismiss error" onClick={() => setError('')}><X size={16}/></button></div>}
+      {exportError && <div className="alert error" role="alert">{exportError}<button className="icon-button" aria-label="Dismiss export error" onClick={() => setExportError('')}><X size={16}/></button></div>}
       {loading && <div className="loading-line" role="status">Syncing your workspace…</div>}
       {page === 'Dashboard' && <Dashboard data={data} stats={stats} month={month} user={user} onNavigate={changePage} onLog={openLog} onTarget={w => setModal({ type: 'target', value: w })}/>}
-      {page === 'My Websites' && <Websites {...{ data, stats, search, setSearch }} onAdd={() => setModal({ type: 'website' })} onEdit={w => setModal({ type: 'website', value: w })} onDelete={w => remove('websites', w)} onTarget={w => setModal({ type: 'target', value: w })} onToggle={w => { const { name, url, description, defaultMonthlyHours, startDate } = w; mutate(`/websites/${w.id}`, 'PUT', { name, url, description, defaultMonthlyHours, startDate, status: w.status === 'Active' ? 'Inactive' : 'Active' }, 'Website status updated').catch(e => setError(e.message)); }}/>} 
+      {page === 'My Websites' && <Websites
+        {...{ data, stats, search, setSearch, exporting }}
+        onAdd={() => setModal({ type: 'website' })}
+        onEdit={w => setModal({ type: 'website', value: w })}
+        onDelete={w => remove('websites', w)}
+        onTarget={w => setModal({ type: 'target', value: w })}
+        onExport={(w, format) => exportFile(`/websites/${encodeURIComponent(w.id)}/export/${format}`, `${w.name} report`)}
+        onExportAll={format => exportFile(`/export/all/${format}`, 'All projects report')}
+        onToggle={w => { const { name, url, description, defaultMonthlyHours, startDate } = w; mutate(`/websites/${w.id}`, 'PUT', { name, url, description, defaultMonthlyHours, startDate, status: w.status === 'Active' ? 'Inactive' : 'Active' }, 'Website status updated').catch(e => setError(e.message)); }}
+      />}
       {page === 'Calendar' && <Calendar {...{ data, year, monthNumber, setMonth }} onDay={date => setModal({ type: 'day', date })}/>}
       {page === 'Work Logs' && <Logs {...{ data, month, search, setSearch }} onAdd={() => openLog()} onEdit={l => openLog(l.date, l)} onDelete={l => remove('logs', l)} onDuplicate={duplicate}/>}
       {page === 'Reports' && <Reports {...{ data, month }}/>} 
@@ -92,10 +105,46 @@ function Dashboard({ data, stats, month, onNavigate, onLog, onTarget }) {
   </>;
 }
 
-function Websites({ data, stats, search, setSearch, onAdd, onEdit, onDelete, onTarget, onToggle }) {
+function Websites({ data, stats, search, setSearch, onAdd, onEdit, onDelete, onTarget, onToggle, onExport, onExportAll, exporting }) {
   const [status, setStatus] = useState('All');
   const rows = data.websites.filter(w => (!search || `${w.name} ${w.url}`.toLowerCase().includes(search.toLowerCase())) && (status === 'All' || w.status === status));
-  return <><div className="toolbar"><SearchBox {...{ search, setSearch }} placeholder="Search websites…"/><div className="segmented">{['All', 'Active', 'Inactive'].map(s => <button className={status === s ? 'selected' : ''} onClick={() => setStatus(s)} key={s}>{s}</button>)}</div><span className="muted toolbar-count">{rows.length} websites</span></div>{!rows.length ? <section className="panel"><Empty title={data.websites.length ? 'No websites found' : 'A home for your websites'} text="Add your websites, set a monthly target, and let your progress take shape." action="Add website" onAction={onAdd}/></section> : <div className="website-grid">{rows.map((w, i) => { const s = stats.rows.find(r => r.id === w.id); return <article className="panel website-card" key={w.id}><div className="website-card-top"><SiteIcon website={w} index={i}/><span className={`badge ${w.status === 'Inactive' ? 'neutral' : ''}`}><span className="status-dot"/>{w.status}</span></div><h2>{w.name}</h2><a className="website-url" href={w.url} target="_blank" rel="noreferrer">{new URL(w.url).hostname}<ExternalLink size={12}/></a><p className="website-description">{w.description || 'A little progress starts with a little time.'}</p><div className="card-allocation"><span>Monthly progress</span><strong>{duration(s?.actual || 0)} <span>/ {duration(s?.allocated ?? Math.round(w.defaultMonthlyHours * 60))}</span></strong></div><div className="track"><i style={{ width: `${Math.min(s?.percent || 0, 100)}%`, background: COLORS[i % COLORS.length] }}/></div><div className="website-start">Since {prettyDate(w.startDate, { year: 'numeric' })}</div><div className="website-card-actions"><button className="text-button" onClick={() => onTarget(w)}>Set target <ArrowUpRight size={14}/></button><div><button className="icon-button" title={w.status === 'Active' ? 'Deactivate website' : 'Activate website'} onClick={() => onToggle(w)}><Activity size={16}/></button><button className="icon-button" title="Edit website" onClick={() => onEdit(w)}><Pencil size={16}/></button><button className="icon-button danger-text" title="Delete website" onClick={() => onDelete(w)}><Trash2 size={16}/></button></div></div></article>; })}</div>}</>;
+  return <>
+    <div className="toolbar websites-toolbar">
+      <SearchBox {...{ search, setSearch }} placeholder="Search websites…"/>
+      <div className="segmented">{['All', 'Active', 'Inactive'].map(s => <button className={status === s ? 'selected' : ''} onClick={() => setStatus(s)} key={s}>{s}</button>)}</div>
+      <div className="project-export-actions">
+        <button className="button secondary" disabled={exporting} onClick={() => onExportAll('xlsx')}><ArrowDownToLine size={15}/>All projects Excel</button>
+        <button className="button secondary" disabled={exporting} onClick={() => onExportAll('csv')}><ArrowDownToLine size={15}/>All projects CSV</button>
+      </div>
+      <span className="muted toolbar-count">{rows.length} websites</span>
+    </div>
+    {!rows.length ? <section className="panel"><Empty title={data.websites.length ? 'No websites found' : 'A home for your websites'} text="Add your websites, set a monthly target, and let your progress take shape." action="Add website" onAction={onAdd}/></section> : <div className="website-grid">{rows.map((w, i) => {
+      const s = stats.rows.find(r => r.id === w.id);
+      return <article className="panel website-card" key={w.id}>
+        <div className="website-card-top"><SiteIcon website={w} index={i}/><span className={`badge ${w.status === 'Inactive' ? 'neutral' : ''}`}><span className="status-dot"/>{w.status}</span></div>
+        <h2>{w.name}</h2>
+        <a className="website-url" href={w.url} target="_blank" rel="noreferrer">{new URL(w.url).hostname}<ExternalLink size={12}/></a>
+        <p className="website-description">{w.description || 'A little progress starts with a little time.'}</p>
+        <div className="card-allocation"><span>Monthly progress</span><strong>{duration(s?.actual || 0)} <span>/ {duration(s?.allocated ?? Math.round(w.defaultMonthlyHours * 60))}</span></strong></div>
+        <div className="track"><i style={{ width: `${Math.min(s?.percent || 0, 100)}%`, background: COLORS[i % COLORS.length] }}/></div>
+        <div className="website-start">Since {prettyDate(w.startDate, { year: 'numeric' })}</div>
+        <div className="website-card-actions">
+          <button className="text-button" onClick={() => onTarget(w)}>Set target <ArrowUpRight size={14}/></button>
+          <div className="website-card-tools">
+            <div className="website-export-actions">
+              <button className="text-button" aria-label={`Export ${w.name} as Excel`} title={`Export ${w.name} as Excel`} disabled={exporting} onClick={() => onExport(w, 'xlsx')}>Excel</button>
+              <button className="text-button" aria-label={`Export ${w.name} as CSV`} title={`Export ${w.name} as CSV`} disabled={exporting} onClick={() => onExport(w, 'csv')}>CSV</button>
+            </div>
+            <div className="website-row-actions">
+              <button className="icon-button" title={w.status === 'Active' ? 'Deactivate website' : 'Activate website'} onClick={() => onToggle(w)}><Activity size={16}/></button>
+              <button className="icon-button" title="Edit website" onClick={() => onEdit(w)}><Pencil size={16}/></button>
+              <button className="icon-button danger-text" title="Delete website" onClick={() => onDelete(w)}><Trash2 size={16}/></button>
+            </div>
+          </div>
+        </div>
+      </article>;
+    })}</div>}
+  </>;
 }
 
 function SearchBox({ search, setSearch, placeholder }) { return <label className="search-box"><Search size={16}/><input aria-label={placeholder} placeholder={placeholder} value={search} onChange={e => setSearch(e.target.value)}/>{search && <button className="icon-button" aria-label="Clear search" onClick={() => setSearch('')}><X size={14}/></button>}</label>; }
@@ -138,9 +187,49 @@ function Modal({ title, children, onClose }) {
 function FormError({ error }) { return error ? <div role="alert" className="alert error">{error}</div> : null; }
 function WebsiteForm({ value, busy, onSave }) { const [error, setError] = useState(''); return <form className="form" onSubmit={async e => { e.preventDefault(); const f = new FormData(e.currentTarget); try { setError(''); await onSave({ name: f.get('name'), url: f.get('url'), description: f.get('description'), defaultMonthlyHours: Number(f.get('allocation')), startDate: f.get('startDate'), status: f.get('status') }); } catch(e) { setError(e.message); } }}><FormError error={error}/><label>Website name<input name="name" defaultValue={value?.name} placeholder="e.g. Studio North" maxLength={120} required/></label><label>Website URL<input name="url" type="url" defaultValue={value?.url} placeholder="https://example.com" required/></label><label>Description<textarea name="description" defaultValue={value?.description} placeholder="A little context about this project…" maxLength={2000} rows={3}/></label><div className="form-columns"><label>Default monthly hours<input name="allocation" type="number" min="0" max="744" step="0.25" defaultValue={value?.defaultMonthlyHours ?? 12} required/></label><label>Project start date<input name="startDate" type="date" min="1900-01-01" max="2200-12-31" defaultValue={value?.startDate || dateKey()} required/></label></div><label>Status<select name="status" defaultValue={value?.status || 'Active'}><option>Active</option><option>Inactive</option></select></label><button className="button primary full-width" disabled={busy}>{busy ? 'Saving…' : 'Save website'}<Check size={16}/></button></form>; }
 function LogForm({ data, date, value, busy, onSave }) {
-  const [error, setError] = useState(''), [query, setQuery] = useState(''), [websiteId, setWebsite] = useState(value?.websiteId || data.websites.find(w => w.status === 'Active')?.id || data.websites[0]?.id || '');
-  const websites = data.websites.filter(w => w.name.toLowerCase().includes(query.toLowerCase()) || w.id === websiteId);
-  return <form className="form" onSubmit={async e => { e.preventDefault(); const f = new FormData(e.currentTarget); try { setError(''); await onSave({ websiteId, date: f.get('date'), description: f.get('description'), category: f.get('category'), hours: Number(f.get('hours')), minutes: Number(f.get('minutes')), notes: f.get('notes') }); } catch(e) { setError(e.message); } }}><FormError error={error}/><label>Date<input name="date" type="date" min="1900-01-01" max="2200-12-31" required defaultValue={value?.date || date}/></label><label>Website<div className="website-select"><input type="search" aria-label="Search saved websites" placeholder="Search your websites…" value={query} onChange={e => setQuery(e.target.value)}/><select required value={websiteId} onChange={e => setWebsite(e.target.value)}>{websites.map(w => <option key={w.id} value={w.id}>{w.name}{w.status === 'Inactive' ? ' (inactive)' : ''}</option>)}</select></div></label><label>What did you work on?<textarea name="description" defaultValue={value?.description} placeholder="Made the homepage feel a little more like home…" required maxLength={2000} rows={3}/></label><div className="form-columns"><label>Hours<input type="number" min="0" max="24" name="hours" defaultValue={value?.hours ?? 1} required/></label><label>Minutes<input type="number" min="0" max="59" name="minutes" defaultValue={value?.minutes ?? 0} required/></label></div><label>Work category<select name="category" defaultValue={value?.category || 'Development'}>{categories.map(c => <option key={c}>{c}</option>)}</select></label><label>Notes <span className="muted">(optional)</span><textarea name="notes" defaultValue={value?.notes} maxLength={5000} placeholder="Anything worth remembering." rows={2}/></label><button className="button primary full-width" disabled={busy}>{busy ? 'Saving…' : 'Save work log'}<Check size={16}/></button></form>;
+  const initialWebsiteId = value?.websiteId || data.websites.find(w => w.status === 'Active')?.id || data.websites[0]?.id || '';
+  const [error, setError] = useState('');
+  const [query, setQuery] = useState(() => data.websites.find(w => w.id === initialWebsiteId)?.name || '');
+  const [websiteId, setWebsite] = useState(initialWebsiteId);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(false), [filtering, setFiltering] = useState(false), [activeIndex, setActiveIndex] = useState(0);
+  const websiteSelectRef = useRef(null);
+  const websites = data.websites.filter(w => !filtering || w.name.toLowerCase().includes(query.trim().toLowerCase()));
+  useEffect(() => {
+    const closeOnOutsideClick = event => {
+      if (!websiteSelectRef.current?.contains(event.target)) { setSuggestionsOpen(false); setFiltering(false); }
+    };
+    document.addEventListener('pointerdown', closeOnOutsideClick);
+    return () => document.removeEventListener('pointerdown', closeOnOutsideClick);
+  }, []);
+  const chooseWebsite = website => { setWebsite(website.id); setQuery(website.name); setFiltering(false); setSuggestionsOpen(false); setActiveIndex(0); };
+  const handleWebsiteKeyDown = event => {
+    if (event.key === 'ArrowDown') { event.preventDefault(); setSuggestionsOpen(true); setActiveIndex(index => websites.length ? Math.min(index < 0 ? 0 : index + 1, websites.length - 1) : -1); }
+    else if (event.key === 'ArrowUp') { event.preventDefault(); setSuggestionsOpen(true); setActiveIndex(index => websites.length ? index < 0 ? websites.length - 1 : Math.max(index - 1, 0) : -1); }
+    else if (event.key === 'Enter' && suggestionsOpen) { event.preventDefault(); const website = websites[activeIndex] || websites[0]; if (website) chooseWebsite(website); }
+    else if (event.key === 'Escape' && suggestionsOpen) { event.preventDefault(); event.stopPropagation(); setSuggestionsOpen(false); setFiltering(false); }
+  };
+  return <form className="form" onSubmit={async e => {
+    e.preventDefault();
+    if (!data.websites.some(website => website.id === websiteId)) { setError('Select a website from the suggestions.'); setSuggestionsOpen(true); return; }
+    const f = new FormData(e.currentTarget);
+    try { setError(''); await onSave({ websiteId, date: f.get('date'), description: f.get('description'), category: f.get('category'), hours: Number(f.get('hours')), minutes: Number(f.get('minutes')), notes: f.get('notes') }); } catch (e) { setError(e.message); }
+  }}>
+    <FormError error={error}/>
+    <label>Date<input name="date" type="date" min="1900-01-01" max="2200-12-31" required defaultValue={value?.date || date}/></label>
+    <label>Website
+      <div className="website-select" ref={websiteSelectRef}>
+        <input type="search" role="combobox" aria-label="Website" aria-autocomplete="list" aria-expanded={suggestionsOpen} aria-controls="website-suggestions" aria-activedescendant={suggestionsOpen && websites[activeIndex] ? `website-option-${websites[activeIndex].id}` : undefined} autoComplete="off" placeholder="Search your websites…" value={query} required onFocus={() => { setSuggestionsOpen(true); setFiltering(false); setActiveIndex(-1); }} onClick={event => { if (websiteId) event.currentTarget.select(); setSuggestionsOpen(true); setFiltering(false); setActiveIndex(-1); }} onChange={event => { setQuery(event.target.value); setWebsite(''); setFiltering(true); setSuggestionsOpen(true); setActiveIndex(-1); }} onKeyDown={handleWebsiteKeyDown}/>
+        {suggestionsOpen && <div className="website-options" id="website-suggestions" role="listbox" aria-label="Matching websites">
+          {websites.length ? websites.map((website, index) => <button id={`website-option-${website.id}`} key={website.id} type="button" role="option" aria-selected={website.id === websiteId} className={`website-option ${index === activeIndex ? 'is-active' : ''}`} onMouseDown={event => event.preventDefault()} onMouseEnter={() => setActiveIndex(index)} onClick={() => chooseWebsite(website)}><span>{website.name}</span>{website.status === 'Inactive' && <small>Inactive</small>}</button>) : <div className="website-option-empty" role="status">No matching website found.</div>}
+        </div>}
+      </div>
+    </label>
+    <label>What did you work on?<textarea name="description" defaultValue={value?.description} placeholder="Made the homepage feel a little more like home…" required maxLength={2000} rows={3}/></label>
+    <div className="form-columns"><label>Hours<input type="number" min="0" max="24" name="hours" defaultValue={value?.hours ?? 1} required/></label><label>Minutes<input type="number" min="0" max="59" name="minutes" defaultValue={value?.minutes ?? 0} required/></label></div>
+    <label>Work category<select name="category" defaultValue={value?.category || 'Development'}>{categories.map(c => <option key={c}>{c}</option>)}</select></label>
+    <label>Notes <span className="muted">(optional)</span><textarea name="notes" defaultValue={value?.notes} maxLength={5000} placeholder="Anything worth remembering." rows={2}/></label>
+    <button className="button primary full-width" disabled={busy}>{busy ? 'Saving…' : 'Save work log'}<Check size={16}/></button>
+  </form>;
 }
 function TargetForm({ website, month, data, busy, onSave, onReset }) {
   const [selected, setSelected] = useState(month), [error, setError] = useState('');
