@@ -25,7 +25,7 @@ Then run:
 npm.cmd run dev
 ```
 
-Open **http://127.0.0.1:5173** and select **Set up primary Admin**. Enter `ADMIN_BOOTSTRAP_TOKEN` from `.env` to initialize the single owner account. Public registration is disabled. Configure SMTP before inviting users or sending password recovery codes. The Express API listens on port 3001; Vite proxies `/api` to it.
+Open **http://127.0.0.1:5173** and select **Set up primary Admin**. Enter `ADMIN_BOOTSTRAP_TOKEN` from `.env` to initialize the single owner account. Public registration is disabled. SMTP is optional for manual account creation and credential sharing; configure it for email invitations and password recovery. The Express API listens on port 3001; Vite proxies `/api` to it.
 
 On other shells use `npm` instead of `npm.cmd`.
 
@@ -64,7 +64,7 @@ The project pins Node.js 24.x and skips the development MongoDB binary download 
 3. Push this project to GitHub. Keep `.env`, `.data`, and `node_modules` out of Git; `.gitignore` covers them.
 4. In Vercel, choose **Add New → Project**, import the repository, and use the repository root with the **Vite** preset. Build command: `npm run build`. Output: `dist`. Select Node.js 24.x in project settings.
 5. Add server-side environment variables for Production (and Preview if needed): `MONGODB_URI`, `JWT_SECRET`, `NODE_ENV=production`, `ADMIN_BOOTSTRAP_TOKEN`, `APP_URL`, and the SMTP variables. Generate secrets with `node -e "console.log(require('node:crypto').randomBytes(48).toString('hex'))"`. Never prefix secrets with `VITE_`.
-6. Deploy, open the HTTPS URL, and initialize the primary Admin with `ADMIN_BOOTSTRAP_TOKEN`. Remove that token from Vercel after owner setup, then redeploy. Configure valid SMTP credentials before creating users or enabling password recovery.
+6. Deploy, open the HTTPS URL, and initialize the primary Admin with `ADMIN_BOOTSTRAP_TOKEN`. Remove that token from Vercel after owner setup, then redeploy. Configure valid SMTP credentials for optional invitations and password recovery; manual user creation works without SMTP.
 7. Verify the owner can create an Editor and Viewer, and confirm the Viewer can export reports but cannot change data.
 
 Do not use `npm run db`, a localhost MongoDB URI, or `npm start` as Vercel build commands. Vercel runs the API function automatically. Your local records are separate from Atlas unless migrated. Preview deployments using the same Atlas URI share production data; use a separate database for previews if needed.
@@ -73,9 +73,9 @@ For a 503 API response, check Vercel Function logs for missing environment varia
 
 ## Accounts and roles
 
-All accounts share one workspace. Admins can manage users, change roles, review audit logs, and manage workspace data. Editors can manage websites, allocations, and work logs. Viewers can read workspace data and download reports but cannot modify it. API routes enforce these permissions independently of the frontend.
+All accounts share one workspace. Only the original workspace owner can manage users, change roles, review audit logs, download backups, and manage settings. Editors can manage websites, allocations, and work logs. Viewers can read workspace data and download reports but cannot modify it. API routes enforce these permissions independently of the frontend.
 
-The first owner is initialized through a one-time bootstrap token; public self-registration is disabled. User invitations include a temporary password and require a password change at first sign-in. Password recovery codes are hashed in MongoDB, expire after 10 minutes, are single-use, and are rate limited. Email delivery requires the server-only SMTP environment variables above. Never store SMTP credentials or bootstrap tokens in frontend variables.
+The first owner is initialized through a one-time bootstrap token; public self-registration is disabled. Manually shared credentials and optional user invitations include a temporary password and require a password change at first sign-in. Password recovery codes are hashed in MongoDB, expire after 10 minutes, are single-use, and are rate limited. Email delivery requires the server-only SMTP environment variables above. Never store SMTP credentials or bootstrap tokens in frontend variables.
 
 ## Features
 
@@ -105,7 +105,7 @@ scripts/             Environment setup and optional persistent local database
 tests/               Calculation/validation tests and real MongoDB API integration
 ```
 
-Passwords are bcrypt hashed. Sessions use signed JWTs in HttpOnly, SameSite Strict cookies with a database-backed version for immediate deactivation, password reset, and logout invalidation. Logout invalidates all sessions for that account. Admins can change their password in Settings. Mutations require a custom request header, cross-origin CORS access is disabled, auth and recovery attempts are rate limited, and every write route checks the caller's role. All roles share the same workspace data; Admins can manage users, change roles, and view audit history. Only the primary Admin can edit their own protected owner account; it cannot be deleted, downgraded, or deactivated. Recovery codes are hashed, expire after 10 minutes, and are single-use. CSV exports escape spreadsheet formulas; Excel cells are stored as strings rather than formulas. Fonts load from Google Fonts with local sans-serif fallbacks.
+Passwords are bcrypt hashed. Sessions use signed JWTs in HttpOnly, SameSite Strict cookies with a database-backed version for immediate deactivation, password reset, and logout invalidation. Logout invalidates all sessions for that account. Admins can change their password in Settings. Mutations require a custom request header, cross-origin CORS access is disabled, auth and recovery attempts are rate limited, and every write route checks the caller's role. All roles share the same workspace data; Only the workspace owner can manage users, change roles, and view audit history. Only the primary Admin can edit their own protected owner account; it cannot be deleted, downgraded, or deactivated. Recovery codes are hashed, expire after 10 minutes, and are single-use. CSV exports escape spreadsheet formulas; Excel cells are stored as strings rather than formulas. Fonts load from Google Fonts with local sans-serif fallbacks.
 
 API routes include `POST /api/auth/bootstrap` (one time), `/login`, `/logout`, `/change-password`, `/forgot-password`, `/reset-password`; `GET /api/auth/setup-status`, `/auth/me`; Admin `/api/users` and `/api/audit-logs`; shared `GET /api/data`; role-protected website, log, allocation and export routes. Public registration is disabled. Individual exports are `GET /api/websites/:id/export/csv|xlsx`; combined exports are `GET /api/export/all/csv|xlsx`. Filtered report export query parameters remain `websiteId`, `category`, `from`, and `to`.
 
@@ -127,3 +127,7 @@ JSON backup is an export for safekeeping and external processing; this version d
 ## Development handover
 
 See [PROJECT_STATUS.md](PROJECT_STATUS.md) for verified results and open configuration work, [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for implementation details, [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for deployment and first-owner setup, and [CHANGELOG.md](CHANGELOG.md) for handover changes. Future coding sessions should follow [AGENTS.md](AGENTS.md).
+
+## Owner-only access management
+
+User Management is visible only to the original owner. Add New User supports Editor/Viewer roles, manual password entry, optional invitation email, one-time Copy Credentials, role/search filters, account status and resets. Login accepts email or Login ID. All members share the owner workspace; other workspace data is excluded at the API. If an existing owner still appears as Editor, use the token-verified owner setup banner after sign-in or follow the existing-account upgrade instructions in DEPLOYMENT_GUIDE.md. No account is promoted just because it logs in.

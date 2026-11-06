@@ -20,7 +20,7 @@ Single npm project, ES modules, Node 24.x. `src/main.jsx` mounts React directly 
 | MonthlyAllocation | Creator userId, websiteId, month, year, allocatedHours. Unique website/year/month index. |
 | AuditLog | Actor ID, name and role snapshot, action, resource type/ID, details, createdAt. Indexed by timestamp. |
 
-All users share one workspace. Historical `userId` fields identify creators, not authorization boundaries. Website deletion intentionally cascades to its logs and allocations after UI confirmation; user deletion leaves shared work records intact. References are Mongoose ObjectIds rather than database foreign keys. JSON transforms omit password hashes, recovery fields, and session versions. JSON backup contains workspace data, not users or audit history, and has no in-app restore.
+Each member has workspaceId equal to the owner account ID. New websites, logs, allocations and audit entries store that workspaceId. All workspace queries use the authenticated membership. Historical records without workspaceId remain visible only when their creator belongs to that workspace; unrelated legacy accounts are not silently merged. Historical `userId` fields retain creator identity. Website deletion intentionally cascades to its logs and allocations after UI confirmation; user deletion leaves shared work records intact. References are Mongoose ObjectIds rather than database foreign keys. JSON transforms omit password hashes, recovery fields, and session versions. JSON backup contains workspace data, not users or audit history, and has no in-app restore.
 
 ## API and permission map
 
@@ -31,8 +31,8 @@ All users share one workspace. Historical `userId` fields identify creators, not
 | POST /api/auth/register | Always denied; accounts are Admin-created. |
 | POST /api/auth/login, /logout, /forgot-password, /reset-password | Login, version-invalidating logout, generic recovery request, atomic recovery-code consumption. |
 | GET /api/auth/me; POST /api/auth/change-password | Authenticated account; forced-change accounts cannot access workspace routes. |
-| /api/users; /api/users/:id; POST /api/users/:id/reset-password | Admin user CRUD and temporary-password reset, with primary-owner and self-lockout protection. |
-| GET /api/audit-logs; GET /api/backup | Admin audit history and workspace JSON export. |
+| /api/users; /api/users/:id; POST /api/users/:id/reset-password | Owner-only user CRUD and temporary-password reset, with primary-owner and self-lockout protection. |
+| GET /api/audit-logs; GET /api/backup | Owner-only audit history and workspace JSON export. |
 | GET /api/data | All authenticated roles; websites, logs, allocations loaded together. |
 | POST/PUT/DELETE /api/websites and /:id | Admin/Editor CRUD. Start-date edits cannot invalidate existing logs. |
 | POST/PUT/DELETE /api/logs and /:id | Admin/Editor CRUD; 1 minute through 24 hours per entry, on/after website start. |
@@ -46,3 +46,9 @@ Mutations require `X-Requested-With: Tempo`. Helmet applies response headers; se
 ## Dependency snapshot
 
 Resolved package-lock versions at handover: React 19.3.1, Vite 7.3.7, Express 5.3.0, Mongoose 8.24.8, bcryptjs 3.0.3, jsonwebtoken 9.0.3, Nodemailer 10.3.1, ExcelJS 4.4.0, Zod 4.6.7, Playwright Core 1.64.1, mongodb-memory-server 10.4.3. package.json declares compatible version ranges; use `npm ci` to reproduce the lockfile. Fonts load from Google Fonts with local fallbacks. No dependencies were added during this handover.
+
+## Owner access update
+
+User Management and Settings navigation require isPrimaryAdmin, with an additional API check that the owner ID equals workspaceId. New members are Editor or Viewer; an existing non-owner admin no longer has user management access. Login accepts email or globally unique username. Manual account creation does not require SMTP: the owner already knows the submitted password, and only transient React state displays it once. Password reset returns a freshly generated temporary password once to the authenticated owner with Cache-Control: no-store. Password hashes and existing passwords are never retrievable. Optional invitation failure preserves the account for manual sharing.
+
+POST /api/auth/claim-owner upgrades the signed-in existing account only when no primary owner exists and a server-configured ADMIN_BOOTSTRAP_TOKEN is verified. It preserves the password and user ID and renews the session. The owner setup banner appears for an uninitialized deployment. An operator can instead use scripts/upgrade-owner.js with a reviewed dry run and explicit --apply; it stamps only that account and its owned legacy records.

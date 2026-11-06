@@ -1,3 +1,11 @@
+# Current update: owner-only workspace access
+
+The requirements below supersede the earlier all-Admin management policy. Only the original owner sees User Management and Settings. New users are Editor/Viewer, can be created without SMTP, and belong to the owner workspace. Username login, one-time copyable credentials, optional invitations, role filters, manual temporary reset and workspace-scoped API queries are implemented. Token-verified owner upgrade preserves the original account password and history.
+
+The requested existing account is identified privately for operator use; it has not been promoted in the live database. A dry run of the upgrade could not reach the configured local MongoDB and changed no records. The live URL is needed to check deployment setup status; owner claim requires a configured server bootstrap token. No automatic promotion based on email/login is implemented.
+
+All 19 Node tests, the production build and browser checks pass for this update. Lint remains unavailable (no script). Details are recorded in CHANGELOG.md. The remainder of this file is the prior handover audit snapshot, retained as history.
+
 # Project status: development handover
 
 Audit date: 6 November 2026. Baseline: `main` at `4b6bb1e` (Add role-based user management and recovery). Development branch: `codex/handover-stabilization`. The initial working tree was clean. No existing work was reset, no commits or pushes were made, and no production configuration was changed.

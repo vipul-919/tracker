@@ -26,3 +26,13 @@ Baseline: `4b6bb1e`; checkpoint branch `codex/handover-stabilization`. Initial a
 - Read-only connection to the configured localhost MongoDB did not succeed. Real Atlas/Vercel/SMTP and production owner setup remain unverified.
 
 See PROJECT_STATUS.md for remaining scope, dependencies, and acceptance requirements.
+
+## Owner-only access-management update
+
+- Supersedes the earlier all-Admin management policy with the original owner as the only user/access/settings manager. New member roles are Editor and Viewer.
+- Adds workspaceId fields, scoped reads/writes/user actions/audit/backups/exports, and scoped fallback for owned legacy records. Unrelated legacy accounts are not merged.
+- Manual account creation works without SMTP; invitation delivery is optional and failure no longer deletes the account.
+- Adds transient one-time credential cards, Copy Credentials, Login ID column, role filtering, and email-or-username sign-in. Newly generated reset passwords can be shared manually; existing passwords remain inaccessible.
+- Adds a server-token-verified website flow to upgrade the logged-in original account without recreating credentials, plus an operator dry-run/apply helper. The live owner account has not been modified.
+- Adds isolated tests for owner claim, manual account creation, failed invitations, username login, cross-workspace API/export isolation, owner protections, reset invalidation and recovery concurrency.
+- Validation: all 19 Node tests pass; production build passes; browser checks pass, including manual creation, Copy Credentials, dismissal and role filtering. Lint remains unavailable because the project has no lint script. The configured local database dry run failed to connect and made no changes.

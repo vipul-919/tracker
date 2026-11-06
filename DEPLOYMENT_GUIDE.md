@@ -53,3 +53,17 @@ SMTP delivery was tested only with an injected sender in isolated tests. Real se
 The Vercel adapter now returns a generic JSON 503 even when JWT_SECRET is missing. Function logs distinguish missing MONGODB_URI, invalid JWT_SECRET, and database connection failure without printing credentials. For connection failure, check Atlas credentials, database permissions, network rules and cluster availability. Redeploy after correcting env configuration. A local isolated test pass does not prove these production settings.
 
 Rate-limit stores are per process/function instance. Configure deployment-wide protection with a shared store or hosting firewall before exposing the service broadly. Preserve backups through Atlas snapshots or database tools; the JSON export is workspace data only and has no restore workflow. Any restore or destructive migration requires separate approval.
+
+## Upgrade an existing owner without recreating the account
+
+After deploying the owner-access update, sign in with the existing account. If no owner is configured, an Enable owner access banner appears. Configure a long random ADMIN_BOOTSTRAP_TOKEN privately in Vercel (with production configuration approval) and redeploy if needed. Enter that token into the banner and choose Enable User Management. The API verifies the token, preserves the user ID/password and existing work, sets the owner/workspace fields, and refreshes the session. The menu then appears. Remove the token and redeploy after success. If another owner already exists, the API refuses the claim. Never paste the token or passwords into chat.
+
+An operator with authorized database access can alternatively preview a specific existing account:
+
+```powershell
+node scripts/upgrade-owner.js --email owner@example.com
+```
+
+This uses the configured server-only MONGODB_URI, disables automatic index/collection creation, and defaults to a dry run. Review the selected account and counts before repeating with --apply. The explicit apply promotes only that existing account, invalidates previous sessions on first promotion, and stamps its owned legacy records with workspaceId. It does not change passwords, delete records, attach unrelated accounts, or transfer ownership from another owner. Keep the existing unique primary-owner index in place. For a partially completed stamping run the operation is idempotent. Sign in again after CLI promotion. Do not run an apply against production without authorization.
+
+For existing collaborators created before workspaceId was introduced, do not infer membership from email or a role. Verify their ownership relationship before any explicit membership migration. New accounts created from User Management are associated automatically. Global email/username uniqueness is preserved for backward-compatible login.

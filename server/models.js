@@ -1,9 +1,11 @@
 import mongoose from 'mongoose';
 const { Schema } = mongoose;
-const owned = { userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true } };
+const workspace = { workspaceId: { type: Schema.Types.ObjectId, ref: 'User', index: true } };
+const owned = { ...workspace, userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true } };
 const opts = { timestamps: true, toJSON: { transform(_doc, ret) { ret.id = String(ret._id); if (ret.websiteId) ret.websiteId = String(ret.websiteId); if (ret.userId) ret.userId = String(ret.userId); delete ret._id; delete ret.__v; delete ret.passwordHash; delete ret.resetCodeHash; delete ret.resetCodeExpiry; delete ret.resetAttempts; delete ret.resetRequestCount; delete ret.resetRequestWindowStart; delete ret.sessionVersion; return ret; } } };
 const roles = ['admin', 'editor', 'viewer'];
 const userSchema = new Schema({
+  ...workspace,
 	name: { type: String, required: true, trim: true, maxlength: 100 },
 	email: { type: String, unique: true, required: true, lowercase: true, trim: true, maxlength: 254 },
 	username: { type: String, unique: true, sparse: true, lowercase: true, trim: true, maxlength: 40 },
@@ -29,6 +31,7 @@ const workLogSchema = new Schema({ ...owned, websiteId: { type: Schema.Types.Obj
 workLogSchema.index({ userId: 1, websiteId: 1, date: 1 });
 workLogSchema.index({ userId: 1, date: 1 });
 const auditLogSchema = new Schema({
+  ...workspace,
 	userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
 	userName: { type: String, required: true },
 	userRole: { type: String, enum: roles, required: true },

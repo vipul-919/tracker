@@ -93,9 +93,9 @@ export function createApp({ secret, production = false, bootstrapToken = process
   const limiter = rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many attempts. Please try again in 15 minutes.' } });
   const resetRequestLimiter = rateLimit({ windowMs: 15 * 60000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'If an active account matches that email, a recovery code will be sent.' } });
   const resetVerifyLimiter = rateLimit({ windowMs: 15 * 60000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'The recovery code is invalid or expired.' } });
-  const adminOnly = (req, res, next) => req.user?.role === 'admin' ? next() : res.status(403).json({ error: 'Only Admins can manage users, backups and audit logs.' });
+  const ownerOnly = (req, res, next) => req.user?.isPrimaryAdmin && String(req.user._id) === String(req.workspaceId) ? next() : res.status(403).json({ error: 'Only the workspace owner can manage users, backups and audit logs.' });
   const requireRoles = (...roles) => (req, res, next) => roles.includes(req.user?.role) ? next() : res.status(403).json({ error: 'Your role does not allow this action.' });
-  const audit = async (req, action, resourceType, resourceId = '', details = {}) => AuditLog.create({ userId: req.user._id, userName: req.user.name, userRole: req.user.role, action, resourceType, resourceId: resourceId ? String(resourceId) : '', details });
+  const audit = async (req, action, resourceType, resourceId = '', details = {}) => AuditLog.create({ workspaceId: req.workspaceId, userId: req.user._id, userName: req.user.name, userRole: req.user.role, action, resourceType, resourceId: resourceId ? String(resourceId) : '', details });
   const invalidReset = res => res.status(400).json({ error: 'The recovery code is invalid or expired.' });
   app.get('/api/auth/setup-status', async (_req, res) => res.json({ needsOwner: !(await User.exists({ isPrimaryAdmin: true })), bootstrapEnabled: Boolean(bootstrapToken) }));
   app.post('/api/auth/register', limiter, (_req, res) => res.status(403).json({ error: 'Public registration is disabled. Ask your Admin to create an account.' }));
@@ -114,15 +114,16 @@ export function createApp({ secret, production = false, bootstrapToken = process
     user.role = 'admin';
     user.status = 'active';
     user.isPrimaryAdmin = true;
+    user.workspaceId = user._id;
     user.mustChangePassword = false;
     user.sessionVersion = (user.sessionVersion || 0) + 1;
     await user.save();
-    await AuditLog.create({ userId: user._id, userName: user.name, userRole: user.role, action: 'owner.bootstrapped', resourceType: 'user', resourceId: String(user._id), details: {} });
+    await AuditLog.create({ workspaceId: user._id, userId: user._id, userName: user.name, userRole: user.role, action: 'owner.bootstrapped', resourceType: 'user', resourceId: String(user._id), details: {} });
     return signIn(res, user);
   });
   app.post('/api/auth/login', limiter, async (req, res) => {
     const value = credentials.parse(req.body);
-    const user = await User.findOne({ email: value.email }).select('+passwordHash +sessionVersion');
+    const user = await User.findOne({ $or: [{ email: value.email }, { username: value.email }] }).select('+passwordHash +sessionVersion');
     if (!user || user.status !== 'active' || !await bcrypt.compare(value.password, user.passwordHash)) return res.status(401).json({ error: 'Email or password is incorrect' });
     return signIn(res, user);
   });
@@ -181,6 +182,10 @@ export function createApp({ secret, production = false, bootstrapToken = process
       const user = await User.findById(token.sub).select('+sessionVersion');
       if (!user || user.status !== 'active' || (token.sv ?? 0) !== (user.sessionVersion || 0)) throw new Error('invalid session');
       req.user = user;
+      req.workspaceId = user.workspaceId || user._id;
+      const members = await User.find({ workspaceId: req.workspaceId }).distinct('_id');
+      req.scope = { $or: [{ workspaceId: req.workspaceId }, { workspaceId: { $exists: false }, userId: { $in: [req.workspaceId, ...members] } }] };
+      req.memberScope = { $or: [{ workspaceId: req.workspaceId }, { _id: req.workspaceId }] };
       if (user.mustChangePassword && !['/api/auth/me', '/api/auth/logout', '/api/auth/change-password'].includes(req.originalUrl.split('?')[0])) return res.status(403).json({ error: 'Change your temporary password to continue.' });
       return next();
     } catch { res.clearCookie('tempo_session', { ...cookie, maxAge: undefined }); return res.status(401).json({ error: 'Please sign in to continue' }); }
@@ -198,27 +203,44 @@ export function createApp({ secret, production = false, bootstrapToken = process
     sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(error => console.error('Password confirmation email delivery failed:', error.message));
     return signIn(res, user);
   });
+  app.post('/api/auth/claim-owner', limiter, async (req, res) => {
+    if (!bootstrapToken) return res.status(503).json({ error: 'Configure ADMIN_BOOTSTRAP_TOKEN on the server to verify ownership.' });
+    const supplied = Buffer.from(req.get('X-Admin-Bootstrap-Token') || ''), expected = Buffer.from(bootstrapToken);
+    if (supplied.length !== expected.length || !timingSafeEqual(supplied, expected)) return res.status(403).json({ error: 'Owner setup token is invalid.' });
+    if (await User.exists({ isPrimaryAdmin: true })) return res.status(409).json({ error: 'The owner is already configured.' });
+    const user = await User.findById(req.user._id).select('+sessionVersion');
+    user.role = 'admin'; user.isPrimaryAdmin = true; user.workspaceId = user._id;
+    user.sessionVersion = (user.sessionVersion || 0) + 1;
+    await user.save();
+    const legacyScope = { userId: user._id, workspaceId: { $exists: false } };
+    await Promise.all([Website, WorkLog, MonthlyAllocation, AuditLog].map(model => model.updateMany(legacyScope, { $set: { workspaceId: user._id } })));
+    req.user = user; req.workspaceId = user._id;
+    await audit(req, 'owner.claimed', 'user', user._id);
+    return signIn(res, user);
+  });
   app.get('/api/auth/me', (req, res) => res.json(req.user.toJSON()));
-  app.get('/api/users', adminOnly, async (_req, res) => {
-    const users = await User.find().select('-passwordHash -resetCodeHash -resetCodeExpiry -resetAttempts -resetRequestCount -resetRequestWindowStart -sessionVersion').sort({ createdAt: -1 });
+  app.get('/api/users', ownerOnly, async (req, res) => {
+    const users = await User.find(req.memberScope).select('-passwordHash -resetCodeHash -resetCodeExpiry -resetAttempts -resetRequestCount -resetRequestWindowStart -sessionVersion').sort({ createdAt: -1 });
     res.json(users.map(user => user.toJSON()));
   });
-  app.post('/api/users', adminOnly, async (req, res) => {
+  app.post('/api/users', ownerOnly, async (req, res) => {
     const value = managedUserInput.parse(req.body);
-    const user = await User.create({ name: value.name, email: value.email, username: value.username, passwordHash: await bcrypt.hash(value.password, 12), role: value.role, status: value.status, mustChangePassword: true });
-    try { await sendMail({ to: user.email, ...invitationEmail({ name: user.name, email: user.email, password: value.password, loginUrl: appUrl }) }); }
-    catch (error) { await User.deleteOne({ _id: user._id }); throw error; }
+    const user = await User.create({ workspaceId: req.workspaceId, name: value.name, email: value.email, username: value.username, passwordHash: await bcrypt.hash(value.password, 12), role: value.role, status: value.status, mustChangePassword: true });
+    let invitationSent = false;
+    try { if (value.sendInvitation) { await sendMail({ to: user.email, ...invitationEmail({ name: user.name, email: user.email, password: value.password, loginUrl: appUrl }) }); invitationSent = true; } }
+    catch { /* Account stays available for manual credential sharing. */ }
     await audit(req, 'user.created', 'user', user._id, { role: user.role, status: user.status });
-    res.status(201).json(user.toJSON());
+    res.set('Cache-Control', 'no-store').status(201).json({ ...user.toJSON(), invitationSent });
   });
-  app.put('/api/users/:id', adminOnly, async (req, res) => {
+  app.put('/api/users/:id', ownerOnly, async (req, res) => {
     const userId = id.parse(req.params.id), value = managedUserUpdateInput.parse(req.body);
-    const user = await User.findById(userId).select('+sessionVersion');
+    const user = await User.findOne({ _id: userId, ...req.memberScope }).select('+sessionVersion');
     if (!user) return res.status(404).json({ error: 'User not found.' });
     if (user.isPrimaryAdmin && !req.user.isPrimaryAdmin) return res.status(403).json({ error: 'Only the primary Admin can change their account details.' });
     if (String(user._id) === String(req.user._id) && (value.status === 'inactive' || (value.role && value.role !== 'admin'))) return res.status(403).json({ error: 'Admins cannot remove their own management access.' });
     if (user.isPrimaryAdmin && ((value.role && value.role !== 'admin') || value.status === 'inactive')) return res.status(403).json({ error: 'The primary Admin cannot be downgraded or deactivated.' });
     const wasActive = user.status === 'active';
+    if (!user.isPrimaryAdmin && value.role === 'admin') return res.status(400).json({ error: 'Choose Editor or Viewer. Ownership cannot be assigned here.' });
     Object.assign(user, value);
     if (wasActive && user.status === 'inactive') { user.sessionVersion = (user.sessionVersion || 0) + 1; user.resetCodeHash = undefined; user.resetCodeExpiry = undefined; }
     await user.save();
@@ -226,13 +248,15 @@ export function createApp({ secret, production = false, bootstrapToken = process
     if (wasActive && user.status === 'inactive') sendMail({ to: user.email, ...deactivationEmail({ name: user.name }) }).catch(error => console.error('Account deactivation email delivery failed:', error.message));
     res.json(user.toJSON());
   });
-  app.post('/api/users/:id/reset-password', adminOnly, async (req, res) => {
-    const user = await User.findById(id.parse(req.params.id)).select('+sessionVersion');
+  app.post('/api/users/:id/reset-password', ownerOnly, async (req, res) => {
+    const user = await User.findOne({ _id: id.parse(req.params.id), ...req.memberScope }).select('+sessionVersion');
     if (!user) return res.status(404).json({ error: 'User not found.' });
     if (user.isPrimaryAdmin) return res.status(403).json({ error: 'Use the password recovery flow for the primary Admin.' });
     if (user.status !== 'active') return res.status(409).json({ error: 'Reactivate this account before resetting its password.' });
     const temporaryPassword = randomBytes(24).toString('base64url');
-    await sendMail({ to: user.email, ...temporaryPasswordEmail({ name: user.name, email: user.email, password: temporaryPassword, loginUrl: appUrl }) });
+    // Return this newly generated password only once to the verified owner.
+    let invitationSent = false;
+    try { await sendMail({ to: user.email, ...temporaryPasswordEmail({ name: user.name, email: user.email, password: temporaryPassword, loginUrl: appUrl }) }); invitationSent = true; } catch { /* Manual sharing remains available. */ }
     user.passwordHash = await bcrypt.hash(temporaryPassword, 12);
     user.mustChangePassword = true;
     user.sessionVersion = (user.sessionVersion || 0) + 1;
@@ -240,10 +264,10 @@ export function createApp({ secret, production = false, bootstrapToken = process
     user.resetCodeExpiry = undefined;
     await user.save();
     await audit(req, 'user.password_reset', 'user', user._id, {});
-    res.json({ message: 'A temporary password was emailed. The user must change it at first login.' });
+    res.set('Cache-Control', 'no-store').json({ temporaryPassword, invitationSent, user: user.toJSON() });
   });
-  app.delete('/api/users/:id', adminOnly, async (req, res) => {
-    const user = await User.findById(id.parse(req.params.id));
+  app.delete('/api/users/:id', ownerOnly, async (req, res) => {
+    const user = await User.findOne({ _id: id.parse(req.params.id), ...req.memberScope });
     if (!user) return res.status(404).json({ error: 'User not found.' });
     if (user.isPrimaryAdmin) return res.status(403).json({ error: 'The primary Admin account cannot be deleted.' });
     if (String(user._id) === String(req.user._id)) return res.status(403).json({ error: 'Admins cannot delete their own account.' });
@@ -251,29 +275,29 @@ export function createApp({ secret, production = false, bootstrapToken = process
     await User.deleteOne({ _id: user._id });
     res.json({ ok: true });
   });
-  app.get('/api/audit-logs', adminOnly, async (req, res) => {
+  app.get('/api/audit-logs', ownerOnly, async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
-    const logs = await AuditLog.find().sort({ createdAt: -1 }).limit(limit).lean();
+    const logs = await AuditLog.find(req.scope).sort({ createdAt: -1 }).limit(limit).lean();
     res.json(logs.map(({ _id, __v, ...log }) => ({ ...log, id: String(_id) })));
   });
-  app.get('/api/data', async (_req, res) => {
-    const [websites, logs, allocations] = await Promise.all([Website.find({}).sort({ createdAt: -1 }), WorkLog.find({}).sort({ date: -1, createdAt: -1 }), MonthlyAllocation.find({})]);
+  app.get('/api/data', async (req, res) => {
+    const [websites, logs, allocations] = await Promise.all([Website.find(req.scope).sort({ createdAt: -1 }), WorkLog.find(req.scope).sort({ date: -1, createdAt: -1 }), MonthlyAllocation.find(req.scope)]);
     res.json({ websites, logs, allocations });
   });
-  const findWebsite = async (_req, websiteId) => { const w = await Website.findById(id.parse(websiteId)); if (!w) throw Object.assign(new Error('Website not found'), { status: 404 }); return w; };
-  app.post('/api/websites', requireRoles('admin', 'editor'), async (req, res) => { const website = await Website.create({ ...websiteInput.parse(req.body), userId: req.user._id }); await audit(req, 'website.created', 'website', website._id, { name: website.name }); res.status(201).json(website); });
-  app.put('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = websiteInput.parse(req.body); const website = await findWebsite(req, req.params.id); if (await WorkLog.exists({ websiteId: website._id, date: { $lt: value.startDate } })) return res.status(409).json({ error: 'Project start date cannot be after existing work logs.' }); Object.assign(website, value); await website.save(); await audit(req, 'website.updated', 'website', website._id, { name: website.name }); res.json(website); });
-  app.delete('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const website = await findWebsite(req, req.params.id); const query = { websiteId: website._id }; await WorkLog.deleteMany(query); await MonthlyAllocation.deleteMany(query); await website.deleteOne(); await audit(req, 'website.deleted', 'website', website._id, { name: website.name }); res.json({ ok: true }); });
-  app.put('/api/allocations', requireRoles('admin', 'editor'), async (req, res) => { const value = allocationInput.parse(req.body); await findWebsite(req, value.websiteId); const query = { websiteId: value.websiteId, year: value.year, month: value.month }; const allocation = await MonthlyAllocation.findOneAndUpdate(query, { $set: { allocatedHours: value.allocatedHours }, $setOnInsert: { userId: req.user._id } }, { upsert: true, new: true, runValidators: true }); await audit(req, 'allocation.updated', 'allocation', allocation._id, { websiteId: value.websiteId, year: value.year, month: value.month }); res.json(allocation); });
-  app.delete('/api/allocations/:id', requireRoles('admin', 'editor'), async (req, res) => { const result = await MonthlyAllocation.deleteOne({ _id: id.parse(req.params.id) }); if (!result.deletedCount) return res.status(404).json({ error: 'Allocation not found' }); await audit(req, 'allocation.deleted', 'allocation', req.params.id, {}); res.json({ ok: true }); });
-  app.post('/api/logs', requireRoles('admin', 'editor'), async (req, res) => { const value = logInput.parse(req.body); const website = await findWebsite(req, value.websiteId); if (value.date < website.startDate) return res.status(400).json({ error: 'Work date must be on or after the project start date' }); const log = await WorkLog.create({ ...value, totalMinutes: value.hours * 60 + value.minutes, userId: req.user._id }); await audit(req, 'worklog.created', 'worklog', log._id, { websiteId: value.websiteId, date: value.date }); res.status(201).json(log); });
-  app.put('/api/logs/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = logInput.parse(req.body); const website = await findWebsite(req, value.websiteId); if (value.date < website.startDate) return res.status(400).json({ error: 'Work date must be on or after the project start date' }); const log = await WorkLog.findByIdAndUpdate(id.parse(req.params.id), { ...value, totalMinutes: value.hours * 60 + value.minutes }, { new: true, runValidators: true }); if (!log) return res.status(404).json({ error: 'Work log not found' }); await audit(req, 'worklog.updated', 'worklog', log._id, { websiteId: value.websiteId, date: value.date }); res.json(log); });
-  app.delete('/api/logs/:id', requireRoles('admin', 'editor'), async (req, res) => { const log = await WorkLog.findByIdAndDelete(id.parse(req.params.id)); if (!log) return res.status(404).json({ error: 'Work log not found' }); await audit(req, 'worklog.deleted', 'worklog', log._id, { websiteId: String(log.websiteId), date: log.date }); res.json({ ok: true }); });
-  app.get('/api/backup', adminOnly, async (_req, res) => { const [websites, logs, allocations] = await Promise.all([Website.find({}), WorkLog.find({}), MonthlyAllocation.find({})]); res.attachment('tempo-backup.json').json({ version: 1, exportedAt: new Date().toISOString(), websites, logs, allocations }); });
+  const findWebsite = async (req, websiteId) => { const w = await Website.findOne({ _id: id.parse(websiteId), ...req.scope }); if (!w) throw Object.assign(new Error('Website not found'), { status: 404 }); return w; };
+  app.post('/api/websites', requireRoles('admin', 'editor'), async (req, res) => { const website = await Website.create({ ...websiteInput.parse(req.body), workspaceId: req.workspaceId, userId: req.user._id }); await audit(req, 'website.created', 'website', website._id, { name: website.name }); res.status(201).json(website); });
+  app.put('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = websiteInput.parse(req.body); const website = await findWebsite(req, req.params.id); if (await WorkLog.exists({ ...req.scope, websiteId: website._id, date: { $lt: value.startDate } })) return res.status(409).json({ error: 'Project start date cannot be after existing work logs.' }); Object.assign(website, value); await website.save(); await audit(req, 'website.updated', 'website', website._id, { name: website.name }); res.json(website); });
+  app.delete('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const website = await findWebsite(req, req.params.id); const query = { websiteId: website._id, ...req.scope }; await WorkLog.deleteMany(query); await MonthlyAllocation.deleteMany(query); await website.deleteOne(); await audit(req, 'website.deleted', 'website', website._id, { name: website.name }); res.json({ ok: true }); });
+  app.put('/api/allocations', requireRoles('admin', 'editor'), async (req, res) => { const value = allocationInput.parse(req.body); await findWebsite(req, value.websiteId); const query = { ...req.scope, websiteId: value.websiteId, year: value.year, month: value.month }; const allocation = await MonthlyAllocation.findOneAndUpdate(query, { $set: { allocatedHours: value.allocatedHours }, $setOnInsert: { workspaceId: req.workspaceId, userId: req.user._id } }, { upsert: true, new: true, runValidators: true }); await audit(req, 'allocation.updated', 'allocation', allocation._id, { websiteId: value.websiteId, year: value.year, month: value.month }); res.json(allocation); });
+  app.delete('/api/allocations/:id', requireRoles('admin', 'editor'), async (req, res) => { const result = await MonthlyAllocation.deleteOne({ _id: id.parse(req.params.id), ...req.scope }); if (!result.deletedCount) return res.status(404).json({ error: 'Allocation not found' }); await audit(req, 'allocation.deleted', 'allocation', req.params.id, {}); res.json({ ok: true }); });
+  app.post('/api/logs', requireRoles('admin', 'editor'), async (req, res) => { const value = logInput.parse(req.body); const website = await findWebsite(req, value.websiteId); if (value.date < website.startDate) return res.status(400).json({ error: 'Work date must be on or after the project start date' }); const log = await WorkLog.create({ ...value, totalMinutes: value.hours * 60 + value.minutes, workspaceId: req.workspaceId, userId: req.user._id }); await audit(req, 'worklog.created', 'worklog', log._id, { websiteId: value.websiteId, date: value.date }); res.status(201).json(log); });
+  app.put('/api/logs/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = logInput.parse(req.body); const website = await findWebsite(req, value.websiteId); if (value.date < website.startDate) return res.status(400).json({ error: 'Work date must be on or after the project start date' }); const log = await WorkLog.findOneAndUpdate({ _id: id.parse(req.params.id), ...req.scope }, { ...value, totalMinutes: value.hours * 60 + value.minutes }, { new: true, runValidators: true }); if (!log) return res.status(404).json({ error: 'Work log not found' }); await audit(req, 'worklog.updated', 'worklog', log._id, { websiteId: value.websiteId, date: value.date }); res.json(log); });
+  app.delete('/api/logs/:id', requireRoles('admin', 'editor'), async (req, res) => { const log = await WorkLog.findOneAndDelete({ _id: id.parse(req.params.id), ...req.scope }); if (!log) return res.status(404).json({ error: 'Work log not found' }); await audit(req, 'worklog.deleted', 'worklog', log._id, { websiteId: String(log.websiteId), date: log.date }); res.json({ ok: true }); });
+  app.get('/api/backup', ownerOnly, async (req, res) => { const [websites, logs, allocations] = await Promise.all([Website.find(req.scope), WorkLog.find(req.scope), MonthlyAllocation.find(req.scope)]); res.attachment('tempo-backup.json').json({ version: 1, exportedAt: new Date().toISOString(), websites, logs, allocations }); });
   app.get('/api/websites/:id/export/:format', async (req, res) => {
     if (!['csv', 'xlsx'].includes(req.params.format)) return res.status(400).json({ error: 'Choose CSV or Excel' });
     const website = await findWebsite(req, req.params.id);
-    const logs = await WorkLog.find({ websiteId: website._id }).sort({ date: 1, createdAt: 1, _id: 1 });
+    const logs = await WorkLog.find({ websiteId: website._id, ...req.scope }).sort({ date: 1, createdAt: 1, _id: 1 });
     const rows = exportRows(logs, [website]);
     const filename = `${safeFilename(website.name)}-Work-Report.${req.params.format}`;
     if (req.params.format === 'csv') return sendExportCsv(res, rows, filename);
@@ -286,8 +310,8 @@ export function createApp({ secret, production = false, bootstrapToken = process
   app.get('/api/export/all/:format', async (req, res) => {
     if (!['csv', 'xlsx'].includes(req.params.format)) return res.status(400).json({ error: 'Choose CSV or Excel' });
     const [websites, logs] = await Promise.all([
-      Website.find({}).sort({ name: 1, _id: 1 }),
-      WorkLog.find({}).sort({ date: 1, createdAt: 1, _id: 1 }),
+      Website.find(req.scope).sort({ name: 1, _id: 1 }),
+      WorkLog.find(req.scope).sort({ date: 1, createdAt: 1, _id: 1 }),
     ]);
     const rows = exportRows(logs, websites);
     if (req.params.format === 'csv') return sendExportCsv(res, rows, `All-Projects-Work-Report.csv`);
@@ -302,7 +326,7 @@ export function createApp({ secret, production = false, bootstrapToken = process
     if (!['csv', 'xlsx'].includes(req.params.format)) return res.status(400).json({ error: 'Choose CSV or Excel' });
     const filters = Object.fromEntries(['websiteId', 'category', 'from', 'to'].map(k => [k, typeof req.query[k] === 'string' ? req.query[k] : '']));
     if (filters.from) date.parse(filters.from); if (filters.to) date.parse(filters.to); if (filters.websiteId) id.parse(filters.websiteId);
-    const [logs, websites] = await Promise.all([WorkLog.find({}), Website.find({})]);
+    const [logs, websites] = await Promise.all([WorkLog.find(req.scope), Website.find(req.scope)]);
     const names = Object.fromEntries(websites.map(w => [String(w._id), w.name]));
     const rows = reportRows(logs.map(l => l.toJSON()), filters).map(l => [l.date, names[l.websiteId] || 'Deleted website', l.description, l.category, l.hours, l.minutes, l.totalMinutes, l.notes]);
     const headers = ['Date', 'Website', 'Description', 'Category', 'Hours', 'Minutes', 'Total minutes', 'Notes'];
