@@ -1,0 +1,16 @@
+import mongoose from 'mongoose';
+const { Schema } = mongoose;
+const owned = { userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true } };
+const opts = { timestamps: true, toJSON: { transform(_doc, ret) { ret.id = String(ret._id); if (ret.websiteId) ret.websiteId = String(ret.websiteId); if (ret.userId) ret.userId = String(ret.userId); delete ret._id; delete ret.__v; delete ret.passwordHash; return ret; } } };
+const userSchema = new Schema({ name: { type: String, required: true }, email: { type: String, unique: true, required: true }, passwordHash: { type: String, required: true } }, opts);
+const websiteSchema = new Schema({ ...owned, name: { type: String, required: true }, url: { type: String, required: true }, description: String, defaultMonthlyHours: { type: Number, min: 0, required: true }, startDate: { type: String, required: true }, status: { type: String, enum: ['Active', 'Inactive'], default: 'Active' } }, opts);
+websiteSchema.index({ userId: 1, name: 1 });
+const allocationSchema = new Schema({ ...owned, websiteId: { type: Schema.Types.ObjectId, ref: 'Website', required: true }, month: { type: Number, min: 1, max: 12, required: true }, year: { type: Number, required: true }, allocatedHours: { type: Number, min: 0, required: true } }, opts);
+allocationSchema.index({ userId: 1, websiteId: 1, year: 1, month: 1 }, { unique: true });
+const workLogSchema = new Schema({ ...owned, websiteId: { type: Schema.Types.ObjectId, ref: 'Website', required: true }, date: { type: String, required: true }, description: { type: String, required: true }, category: { type: String, required: true }, hours: { type: Number, min: 0, required: true }, minutes: { type: Number, min: 0, max: 59, required: true }, totalMinutes: { type: Number, min: 1, required: true }, notes: String }, opts);
+workLogSchema.index({ userId: 1, websiteId: 1, date: 1 });
+workLogSchema.index({ userId: 1, date: 1 });
+export const User = mongoose.model('User', userSchema);
+export const Website = mongoose.model('Website', websiteSchema);
+export const MonthlyAllocation = mongoose.model('MonthlyAllocation', allocationSchema);
+export const WorkLog = mongoose.model('WorkLog', workLogSchema);
