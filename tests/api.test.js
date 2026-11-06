@@ -200,3 +200,60 @@ test('individual and combined exports include complete historical work history',
   await emptyWorkbook.xlsx.load(emptyXlsx.body);
   assert.equal(emptyWorkbook.worksheets[0].rowCount, 1);
 });
+
+
+test('handover regressions: Admin access, protected owner, history, recovery and logout', async () => {
+  const messages = [];
+  const fresh = createApp({ secret: 'handover-regression-secret-longer-than-32-characters', sendMail: async message => messages.push(message) });
+  const primary = request.agent(fresh), admin = request.agent(fresh);
+  await primary.post('/api/auth/login').set(...header).send({ email: 'owner@example.com', password: 'strong-owner-password' }).expect(200);
+  const primaryUser = (await primary.get('/api/auth/me').expect(200)).body;
+  const created = (await primary.post('/api/users').set(...header).send({ name: 'Second Admin', email: 'second-admin@example.com', password: 'Temporary-Admin-Password-1', role: 'admin', status: 'active' }).expect(201)).body;
+  await admin.post('/api/auth/login').set(...header).send({ email: created.email, password: 'Temporary-Admin-Password-1' }).expect(200);
+  await admin.post('/api/auth/change-password').set(...header).send({ newPassword: 'Changed-Admin-Password-2' }).expect(200);
+  await admin.get('/api/users').expect(200);
+  await admin.get('/api/audit-logs').expect(200);
+  await admin.get('/api/backup').expect(200);
+  await admin.put('/api/users/' + primaryUser.id).set(...header).send({ name: 'Unauthorized owner edit' }).expect(403);
+  await admin.put('/api/users/' + created.id).set(...header).send({ role: 'viewer' }).expect(403);
+  await admin.delete('/api/users/' + created.id).set(...header).expect(403);
+  const member = (await admin.post('/api/users').set(...header).send({ name: 'Managed Viewer', email: 'managed-viewer@example.com', password: 'Temporary-Managed-Password-1', role: 'viewer', status: 'active' }).expect(201)).body;
+  await admin.put('/api/users/' + member.id).set(...header).send({ name: 'Updated Viewer' }).expect(200);
+  const site = (await admin.post('/api/websites').set(...header).send(website).expect(201)).body;
+  await admin.post('/api/logs').set(...header).send({ websiteId: site.id, date: '2026-02-01', description: 'Historical log', category: 'Development', hours: 1, minutes: 0 }).expect(201);
+  await admin.put('/api/websites/' + site.id).set(...header).send({ ...website, startDate: '2026-03-01' }).expect(409);
+  await admin.get('/api/data').expect(200).expect(({ body }) => assert.equal(body.websites.find(w => w.id === site.id).startDate, website.startDate));
+
+  await request(fresh).post('/api/auth/forgot-password').set(...header).send({ email: member.email }).expect(200);
+  const staleCode = messages.at(-1).text.match(/\b\d{8}\b/)[0];
+  await admin.post('/api/users/' + member.id + '/reset-password').set(...header).expect(200);
+  await request(fresh).post('/api/auth/reset-password').set(...header).send({ email: member.email, code: staleCode, password: 'Stale-Recovery-Password-1' }).expect(400);
+  await request(fresh).post('/api/auth/forgot-password').set(...header).send({ email: member.email }).expect(200);
+  const code = messages.at(-1).text.match(/\b\d{8}\b/)[0];
+  const results = await Promise.all(['Concurrent-Password-A', 'Concurrent-Password-B'].map(password => request(fresh).post('/api/auth/reset-password').set(...header).send({ email: member.email, code, password })));
+  assert.deepEqual(results.map(result => result.status).sort(), [200, 400]);
+
+  await request(fresh).post('/api/auth/forgot-password').set(...header).send({ email: created.email }).expect(200);
+  const beforeChangeCode = messages.at(-1).text.match(/\b\d{8}\b/)[0];
+  await admin.post('/api/auth/change-password').set(...header).send({ currentPassword: 'wrong-password', newPassword: 'Changed-Admin-Password-3' }).expect(401);
+  const changed = await admin.post('/api/auth/change-password').set(...header).send({ currentPassword: 'Changed-Admin-Password-2', newPassword: 'Changed-Admin-Password-3' }).expect(200);
+  await request(fresh).post('/api/auth/reset-password').set(...header).send({ email: created.email, code: beforeChangeCode, password: 'Stale-Recovery-Password-2' }).expect(400);
+  const copiedCookie = changed.headers['set-cookie'][0].split(';')[0];
+  await admin.post('/api/auth/logout').set(...header).expect(200);
+  await request(fresh).get('/api/data').set('Cookie', copiedCookie).expect(401);
+  await admin.post('/api/auth/logout').set(...header).expect(200);
+  await primary.delete('/api/users/' + member.id).set(...header).expect(200);
+});
+
+
+test('combined Excel export accepts reserved, quoted, duplicate and long website names', async () => {
+  const names = ['History', "'Quoted'", 'Summary', 'All Work Logs', 'x'.repeat(30) + "'tail", 'Same/Name', 'Same:Name'];
+  for (const name of names) await owner.post('/api/websites').set(...header).send({ ...website, name }).expect(201);
+  const result = await other.get('/api/export/all/xlsx').buffer(true).parse((res, cb) => { const chunks = []; res.on('data', chunk => chunks.push(chunk)); res.on('end', () => cb(null, Buffer.concat(chunks))); }).expect(200);
+  const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(result.body);
+  const sheets = workbook.worksheets.map(sheet => sheet.name);
+  assert.equal(new Set(sheets.map(name => name.toLowerCase())).size, sheets.length);
+  assert.ok(sheets.includes('Website History'));
+  assert.ok(sheets.includes('Quoted'));
+  assert.ok(sheets.every(name => name.length <= 31 && !name.startsWith("'") && !name.endsWith("'")));
+});

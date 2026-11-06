@@ -29,7 +29,8 @@ function safeFilename(value) {
 
 function safeWorksheetName(value, used) {
   const forbidden = new Set(['\\', '/', '?', '*', '[', ']', ':']);
-  const base = [...String(value)].map(character => forbidden.has(character) ? '-' : character).join('').trim().slice(0, 31) || 'Website';
+  let base = [...String(value)].map(character => forbidden.has(character) || character.charCodeAt(0) < 32 ? '-' : character).join('').trim().slice(0, 31).replace(/^'+|'+$/g, '') || 'Website';
+  if (base.toLowerCase() === 'history') base = 'Website History';
   let name = base, suffix = 2;
   while (used.has(name.toLowerCase())) {
     const tail = ` (${suffix++})`;
@@ -92,7 +93,7 @@ export function createApp({ secret, production = false, bootstrapToken = process
   const limiter = rateLimit({ windowMs: 15 * 60000, limit: 30, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Too many attempts. Please try again in 15 minutes.' } });
   const resetRequestLimiter = rateLimit({ windowMs: 15 * 60000, limit: 8, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'If an active account matches that email, a recovery code will be sent.' } });
   const resetVerifyLimiter = rateLimit({ windowMs: 15 * 60000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'The recovery code is invalid or expired.' } });
-  const primaryAdminOnly = (req, res, next) => req.user?.isPrimaryAdmin ? next() : res.status(403).json({ error: 'Only the primary Admin can manage users and audit logs.' });
+  const adminOnly = (req, res, next) => req.user?.role === 'admin' ? next() : res.status(403).json({ error: 'Only Admins can manage users, backups and audit logs.' });
   const requireRoles = (...roles) => (req, res, next) => roles.includes(req.user?.role) ? next() : res.status(403).json({ error: 'Your role does not allow this action.' });
   const audit = async (req, action, resourceType, resourceId = '', details = {}) => AuditLog.create({ userId: req.user._id, userName: req.user.name, userRole: req.user.role, action, resourceType, resourceId: resourceId ? String(resourceId) : '', details });
   const invalidReset = res => res.status(400).json({ error: 'The recovery code is invalid or expired.' });
@@ -125,7 +126,13 @@ export function createApp({ secret, production = false, bootstrapToken = process
     if (!user || user.status !== 'active' || !await bcrypt.compare(value.password, user.passwordHash)) return res.status(401).json({ error: 'Email or password is incorrect' });
     return signIn(res, user);
   });
-  app.post('/api/auth/logout', (_req, res) => { res.clearCookie('tempo_session', { ...cookie, maxAge: undefined }); res.json({ ok: true }); });
+  app.post('/api/auth/logout', async (req, res) => {
+    let token;
+    try { token = jwt.verify(req.cookies.tempo_session, secret, { algorithms: ['HS256'] }); } catch { /* Already signed out. */ }
+    if (token) await User.updateOne({ _id: token.sub, sessionVersion: token.sv ?? 0 }, { $inc: { sessionVersion: 1 } });
+    res.clearCookie('tempo_session', { ...cookie, maxAge: undefined });
+    res.json({ ok: true });
+  });
   app.post('/api/auth/forgot-password', resetRequestLimiter, async (req, res) => {
     const { email } = forgotPasswordInput.parse(req.body);
     const generic = { message: 'If an active account matches that email, a recovery code will be sent.' };
@@ -141,7 +148,10 @@ export function createApp({ secret, production = false, bootstrapToken = process
     user.resetRequestCount = (user.resetRequestCount || 0) + 1;
     await user.save();
     try { await sendMail({ to: user.email, ...recoveryEmail({ name: user.name, code }) }); }
-    catch (error) { user.resetCodeHash = undefined; user.resetCodeExpiry = undefined; await user.save(); console.error('Password recovery email delivery failed:', error.message); }
+    catch {
+      await User.updateOne({ _id: user._id, resetCodeHash: user.resetCodeHash }, { $unset: { resetCodeHash: 1, resetCodeExpiry: 1 } });
+      console.error('Password recovery email delivery failed. Check SMTP configuration.');
+    }
     return res.json(generic);
   });
   app.post('/api/auth/reset-password', resetVerifyLimiter, async (req, res) => {
@@ -151,20 +161,17 @@ export function createApp({ secret, production = false, bootstrapToken = process
     const candidate = Buffer.from(createHash('sha256').update(value.code).digest('hex'), 'hex');
     const expected = Buffer.from(user.resetCodeHash, 'hex');
     if (candidate.length !== expected.length || !timingSafeEqual(candidate, expected)) {
-      user.resetAttempts = (user.resetAttempts || 0) + 1;
-      if (user.resetAttempts >= 5) { user.resetCodeHash = undefined; user.resetCodeExpiry = undefined; }
-      await user.save();
+      await User.updateOne({ _id: user._id, resetCodeHash: user.resetCodeHash }, { $inc: { resetAttempts: 1 } });
       return invalidReset(res);
     }
-    user.passwordHash = await bcrypt.hash(value.password, 12);
-    user.mustChangePassword = false;
-    user.sessionVersion = (user.sessionVersion || 0) + 1;
-    user.resetCodeHash = undefined;
-    user.resetCodeExpiry = undefined;
-    user.resetAttempts = 0;
-    user.resetRequestCount = 0;
-    user.resetRequestWindowStart = undefined;
-    await user.save();
+    const passwordHash = await bcrypt.hash(value.password, 12);
+    // Consume this exact code once, even when requests overlap during hashing.
+    const changed = await User.findOneAndUpdate({ _id: user._id, status: 'active', resetCodeHash: user.resetCodeHash, resetCodeExpiry: { $gt: new Date() }, resetAttempts: { $lt: 5 }, sessionVersion: user.sessionVersion }, {
+      $set: { passwordHash, mustChangePassword: false, resetAttempts: 0, resetRequestCount: 0 },
+      $inc: { sessionVersion: 1 },
+      $unset: { resetCodeHash: 1, resetCodeExpiry: 1, resetRequestWindowStart: 1 },
+    });
+    if (!changed) return invalidReset(res);
     sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(error => console.error('Password confirmation email delivery failed:', error.message));
     return res.json({ message: 'Password updated. Sign in with your new password.' });
   });
@@ -185,16 +192,18 @@ export function createApp({ secret, production = false, bootstrapToken = process
     user.passwordHash = await bcrypt.hash(value.newPassword, 12);
     user.mustChangePassword = false;
     user.sessionVersion = (user.sessionVersion || 0) + 1;
+    user.resetCodeHash = undefined;
+    user.resetCodeExpiry = undefined;
     await user.save();
     sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(error => console.error('Password confirmation email delivery failed:', error.message));
     return signIn(res, user);
   });
   app.get('/api/auth/me', (req, res) => res.json(req.user.toJSON()));
-  app.get('/api/users', primaryAdminOnly, async (_req, res) => {
+  app.get('/api/users', adminOnly, async (_req, res) => {
     const users = await User.find().select('-passwordHash -resetCodeHash -resetCodeExpiry -resetAttempts -resetRequestCount -resetRequestWindowStart -sessionVersion').sort({ createdAt: -1 });
     res.json(users.map(user => user.toJSON()));
   });
-  app.post('/api/users', primaryAdminOnly, async (req, res) => {
+  app.post('/api/users', adminOnly, async (req, res) => {
     const value = managedUserInput.parse(req.body);
     const user = await User.create({ name: value.name, email: value.email, username: value.username, passwordHash: await bcrypt.hash(value.password, 12), role: value.role, status: value.status, mustChangePassword: true });
     try { await sendMail({ to: user.email, ...invitationEmail({ name: user.name, email: user.email, password: value.password, loginUrl: appUrl }) }); }
@@ -202,10 +211,12 @@ export function createApp({ secret, production = false, bootstrapToken = process
     await audit(req, 'user.created', 'user', user._id, { role: user.role, status: user.status });
     res.status(201).json(user.toJSON());
   });
-  app.put('/api/users/:id', primaryAdminOnly, async (req, res) => {
+  app.put('/api/users/:id', adminOnly, async (req, res) => {
     const userId = id.parse(req.params.id), value = managedUserUpdateInput.parse(req.body);
     const user = await User.findById(userId).select('+sessionVersion');
     if (!user) return res.status(404).json({ error: 'User not found.' });
+    if (user.isPrimaryAdmin && !req.user.isPrimaryAdmin) return res.status(403).json({ error: 'Only the primary Admin can change their account details.' });
+    if (String(user._id) === String(req.user._id) && (value.status === 'inactive' || (value.role && value.role !== 'admin'))) return res.status(403).json({ error: 'Admins cannot remove their own management access.' });
     if (user.isPrimaryAdmin && ((value.role && value.role !== 'admin') || value.status === 'inactive')) return res.status(403).json({ error: 'The primary Admin cannot be downgraded or deactivated.' });
     const wasActive = user.status === 'active';
     Object.assign(user, value);
@@ -215,7 +226,7 @@ export function createApp({ secret, production = false, bootstrapToken = process
     if (wasActive && user.status === 'inactive') sendMail({ to: user.email, ...deactivationEmail({ name: user.name }) }).catch(error => console.error('Account deactivation email delivery failed:', error.message));
     res.json(user.toJSON());
   });
-  app.post('/api/users/:id/reset-password', primaryAdminOnly, async (req, res) => {
+  app.post('/api/users/:id/reset-password', adminOnly, async (req, res) => {
     const user = await User.findById(id.parse(req.params.id)).select('+sessionVersion');
     if (!user) return res.status(404).json({ error: 'User not found.' });
     if (user.isPrimaryAdmin) return res.status(403).json({ error: 'Use the password recovery flow for the primary Admin.' });
@@ -225,19 +236,22 @@ export function createApp({ secret, production = false, bootstrapToken = process
     user.passwordHash = await bcrypt.hash(temporaryPassword, 12);
     user.mustChangePassword = true;
     user.sessionVersion = (user.sessionVersion || 0) + 1;
+    user.resetCodeHash = undefined;
+    user.resetCodeExpiry = undefined;
     await user.save();
     await audit(req, 'user.password_reset', 'user', user._id, {});
     res.json({ message: 'A temporary password was emailed. The user must change it at first login.' });
   });
-  app.delete('/api/users/:id', primaryAdminOnly, async (req, res) => {
+  app.delete('/api/users/:id', adminOnly, async (req, res) => {
     const user = await User.findById(id.parse(req.params.id));
     if (!user) return res.status(404).json({ error: 'User not found.' });
     if (user.isPrimaryAdmin) return res.status(403).json({ error: 'The primary Admin account cannot be deleted.' });
+    if (String(user._id) === String(req.user._id)) return res.status(403).json({ error: 'Admins cannot delete their own account.' });
     await audit(req, 'user.deleted', 'user', user._id, { role: user.role });
     await User.deleteOne({ _id: user._id });
     res.json({ ok: true });
   });
-  app.get('/api/audit-logs', primaryAdminOnly, async (req, res) => {
+  app.get('/api/audit-logs', adminOnly, async (req, res) => {
     const limit = Math.min(Math.max(Number(req.query.limit) || 100, 1), 500);
     const logs = await AuditLog.find().sort({ createdAt: -1 }).limit(limit).lean();
     res.json(logs.map(({ _id, __v, ...log }) => ({ ...log, id: String(_id) })));
@@ -248,14 +262,14 @@ export function createApp({ secret, production = false, bootstrapToken = process
   });
   const findWebsite = async (_req, websiteId) => { const w = await Website.findById(id.parse(websiteId)); if (!w) throw Object.assign(new Error('Website not found'), { status: 404 }); return w; };
   app.post('/api/websites', requireRoles('admin', 'editor'), async (req, res) => { const website = await Website.create({ ...websiteInput.parse(req.body), userId: req.user._id }); await audit(req, 'website.created', 'website', website._id, { name: website.name }); res.status(201).json(website); });
-  app.put('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = websiteInput.parse(req.body); const website = await findWebsite(req, req.params.id); Object.assign(website, value); await website.save(); await audit(req, 'website.updated', 'website', website._id, { name: website.name }); res.json(website); });
+  app.put('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = websiteInput.parse(req.body); const website = await findWebsite(req, req.params.id); if (await WorkLog.exists({ websiteId: website._id, date: { $lt: value.startDate } })) return res.status(409).json({ error: 'Project start date cannot be after existing work logs.' }); Object.assign(website, value); await website.save(); await audit(req, 'website.updated', 'website', website._id, { name: website.name }); res.json(website); });
   app.delete('/api/websites/:id', requireRoles('admin', 'editor'), async (req, res) => { const website = await findWebsite(req, req.params.id); const query = { websiteId: website._id }; await WorkLog.deleteMany(query); await MonthlyAllocation.deleteMany(query); await website.deleteOne(); await audit(req, 'website.deleted', 'website', website._id, { name: website.name }); res.json({ ok: true }); });
   app.put('/api/allocations', requireRoles('admin', 'editor'), async (req, res) => { const value = allocationInput.parse(req.body); await findWebsite(req, value.websiteId); const query = { websiteId: value.websiteId, year: value.year, month: value.month }; const allocation = await MonthlyAllocation.findOneAndUpdate(query, { $set: { allocatedHours: value.allocatedHours }, $setOnInsert: { userId: req.user._id } }, { upsert: true, new: true, runValidators: true }); await audit(req, 'allocation.updated', 'allocation', allocation._id, { websiteId: value.websiteId, year: value.year, month: value.month }); res.json(allocation); });
   app.delete('/api/allocations/:id', requireRoles('admin', 'editor'), async (req, res) => { const result = await MonthlyAllocation.deleteOne({ _id: id.parse(req.params.id) }); if (!result.deletedCount) return res.status(404).json({ error: 'Allocation not found' }); await audit(req, 'allocation.deleted', 'allocation', req.params.id, {}); res.json({ ok: true }); });
   app.post('/api/logs', requireRoles('admin', 'editor'), async (req, res) => { const value = logInput.parse(req.body); const website = await findWebsite(req, value.websiteId); if (value.date < website.startDate) return res.status(400).json({ error: 'Work date must be on or after the project start date' }); const log = await WorkLog.create({ ...value, totalMinutes: value.hours * 60 + value.minutes, userId: req.user._id }); await audit(req, 'worklog.created', 'worklog', log._id, { websiteId: value.websiteId, date: value.date }); res.status(201).json(log); });
   app.put('/api/logs/:id', requireRoles('admin', 'editor'), async (req, res) => { const value = logInput.parse(req.body); const website = await findWebsite(req, value.websiteId); if (value.date < website.startDate) return res.status(400).json({ error: 'Work date must be on or after the project start date' }); const log = await WorkLog.findByIdAndUpdate(id.parse(req.params.id), { ...value, totalMinutes: value.hours * 60 + value.minutes }, { new: true, runValidators: true }); if (!log) return res.status(404).json({ error: 'Work log not found' }); await audit(req, 'worklog.updated', 'worklog', log._id, { websiteId: value.websiteId, date: value.date }); res.json(log); });
   app.delete('/api/logs/:id', requireRoles('admin', 'editor'), async (req, res) => { const log = await WorkLog.findByIdAndDelete(id.parse(req.params.id)); if (!log) return res.status(404).json({ error: 'Work log not found' }); await audit(req, 'worklog.deleted', 'worklog', log._id, { websiteId: String(log.websiteId), date: log.date }); res.json({ ok: true }); });
-  app.get('/api/backup', primaryAdminOnly, async (_req, res) => { const [websites, logs, allocations] = await Promise.all([Website.find({}), WorkLog.find({}), MonthlyAllocation.find({})]); res.attachment('tempo-backup.json').json({ version: 1, exportedAt: new Date().toISOString(), websites, logs, allocations }); });
+  app.get('/api/backup', adminOnly, async (_req, res) => { const [websites, logs, allocations] = await Promise.all([Website.find({}), WorkLog.find({}), MonthlyAllocation.find({})]); res.attachment('tempo-backup.json').json({ version: 1, exportedAt: new Date().toISOString(), websites, logs, allocations }); });
   app.get('/api/websites/:id/export/:format', async (req, res) => {
     if (!['csv', 'xlsx'].includes(req.params.format)) return res.status(400).json({ error: 'Choose CSV or Excel' });
     const website = await findWebsite(req, req.params.id);

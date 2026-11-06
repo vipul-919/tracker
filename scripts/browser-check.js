@@ -46,6 +46,7 @@ try {
   if (!rowVisible) { const result = await createUserResponse; throw new Error(`User row missing after create: ${result ? `${result.status()} ${await result.text()}` : 'no API response'}; URL=${page.url()}; ${await page.locator('body').innerText()}; page errors: ${errors.join(' | ')}`); }
   assert.match(await userEmailCell.locator('xpath=ancestor::tr').innerText(), /Viewer/);
   await page.getByRole('button', { name: 'Audit log' }).click();
+  await page.getByRole('heading', { name: 'Activity log' }).waitFor();
   assert.match(await page.locator('.user-table-panel').innerText(), /user\.created/);
   await page.getByRole('button', { name: 'Users', exact: true }).click();
   await page.getByRole('button', { name: /My Websites/ }).click();
@@ -184,6 +185,31 @@ try {
   await page.getByRole('button', { name: 'Open menu' }).click();
   await page.getByRole('button', { name: 'Settings', exact: true }).click();
   await page.getByRole('heading', { name: 'Your workspace', exact: true }).waitFor();
+  await page.getByLabel('Current password', { exact: true }).fill('test-browser-password');
+  await page.getByLabel('New password', { exact: true }).fill('Owner-Updated-Password-3');
+  await page.getByLabel('Confirm new password', { exact: true }).fill('Owner-Updated-Password-3');
+  await page.getByRole('button', { name: 'Change password', exact: true }).click();
+  await page.getByRole('status').filter({ hasText: 'Password updated.' }).waitFor();
+  await page.setViewportSize({ width: 1440, height: 1100 });
+  await page.evaluate(async () => {
+    const response = await fetch('/api/users', { method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'Tempo' }, body: JSON.stringify({ name: 'Browser Admin', email: 'browser-admin@example.com', password: 'Temporary-Admin-Password-1', role: 'admin', status: 'active' }) });
+    if (!response.ok) throw new Error('Could not create test Admin');
+  });
+  const adminPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
+  await adminPage.goto(page.url());
+  await adminPage.getByLabel('Email address').fill('browser-admin@example.com');
+  await adminPage.getByLabel('Password', { exact: true }).fill('Temporary-Admin-Password-1');
+  await adminPage.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await adminPage.getByRole('heading', { name: 'Choose a new password.' }).waitFor();
+  await adminPage.getByLabel('New password', { exact: true }).fill('Admin-Updated-Password-2');
+  await adminPage.getByLabel('Confirm new password').fill('Admin-Updated-Password-2');
+  await adminPage.getByRole('button', { name: 'Update password' }).click();
+  await adminPage.getByRole('button', { name: 'User Management' }).click();
+  await adminPage.getByRole('button', { name: 'Edit Alex Morgan' }).waitFor();
+  assert.equal(await adminPage.getByRole('button', { name: 'Edit Alex Morgan' }).isDisabled(), true);
+  await adminPage.getByRole('button', { name: 'Audit log', exact: true }).click();
+  await adminPage.getByRole('heading', { name: 'Activity log' }).waitFor();
+  await adminPage.close();
   assert.equal(errors.length, 0, errors.join('\n'));
   const viewerPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   const viewerErrors = []; viewerPage.on('pageerror', error => viewerErrors.push(error.message));

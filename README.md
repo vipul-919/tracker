@@ -4,7 +4,7 @@ A full-stack React, Express, and MongoDB application for managing website alloca
 
 ## Quick start (Windows PowerShell)
 
-Install Node.js **22.12 or newer**. In this directory:
+Install Node.js **24.x** (matching package.json and deployment settings). In this directory:
 
 ```powershell
 npm.cmd install
@@ -86,7 +86,7 @@ The first owner is initialized through a one-time bootstrap token; public self-r
 - Monthly targets: default allocation plus overrides per website/month/year, including zero-hour targets. Restore a default by removing the override.
 - Reports: daily, Monday–Sunday weekly, monthly, yearly, and custom date ranges; website and category filters; website, category, and day charts; tables and CSV/Excel exports. Reports intentionally include inactive websites unless filtered to a specific website.
 - Settings: light/dark mode, primary-owner account details, full JSON data backup, and getting-started guide.
-- User Management: primary-owner-only account creation, role/status management, password resets, and audit history.
+- User Management: Admin account creation, role/status management, password resets, and audit history.
 - Responsive layouts, loading/error/empty states, keyboard focus, modal focus trapping, escape-to-close, and reduced-motion support.
 
 The dashboard counts active websites whose project start date is on or before the selected month. Charts and recent dashboard work use that same portfolio. Dates are stored as validated `YYYY-MM-DD` strings, so calendar dates do not shift across timezones. All aggregation uses integer minutes; monthly allocations are converted to minutes. Actual logs must be between one minute and 24 hours per entry and cannot precede their website's start date. Remaining time can be negative. Completion percentages can exceed 100%; progress bars cap at 100%.
@@ -105,9 +105,9 @@ scripts/             Environment setup and optional persistent local database
 tests/               Calculation/validation tests and real MongoDB API integration
 ```
 
-Passwords are bcrypt hashed. Sessions use signed JWTs in HttpOnly, SameSite Strict cookies with a database-backed version for immediate deactivation and reset invalidation. Mutations require a custom request header, cross-origin CORS access is disabled, auth and recovery attempts are rate limited, and every write route checks the caller's role. All roles share the same workspace data; only the primary Admin can manage users, change roles, and view audit history. Recovery codes are hashed, expire after 10 minutes, and are single-use. CSV exports escape spreadsheet formulas; Excel cells are stored as strings rather than formulas. Fonts load from Google Fonts with local sans-serif fallbacks.
+Passwords are bcrypt hashed. Sessions use signed JWTs in HttpOnly, SameSite Strict cookies with a database-backed version for immediate deactivation, password reset, and logout invalidation. Logout invalidates all sessions for that account. Admins can change their password in Settings. Mutations require a custom request header, cross-origin CORS access is disabled, auth and recovery attempts are rate limited, and every write route checks the caller's role. All roles share the same workspace data; Admins can manage users, change roles, and view audit history. Only the primary Admin can edit their own protected owner account; it cannot be deleted, downgraded, or deactivated. Recovery codes are hashed, expire after 10 minutes, and are single-use. CSV exports escape spreadsheet formulas; Excel cells are stored as strings rather than formulas. Fonts load from Google Fonts with local sans-serif fallbacks.
 
-API routes include `POST /api/auth/bootstrap` (one time), `/login`, `/logout`, `/change-password`, `/forgot-password`, `/reset-password`; `GET /api/auth/setup-status`, `/auth/me`; primary-owner `/api/users` and `/api/audit-logs`; shared `GET /api/data`; role-protected website, log, allocation and export routes. Public registration is disabled. Individual exports are `GET /api/websites/:id/export/csv|xlsx`; combined exports are `GET /api/export/all/csv|xlsx`. Filtered report export query parameters remain `websiteId`, `category`, `from`, and `to`.
+API routes include `POST /api/auth/bootstrap` (one time), `/login`, `/logout`, `/change-password`, `/forgot-password`, `/reset-password`; `GET /api/auth/setup-status`, `/auth/me`; Admin `/api/users` and `/api/audit-logs`; shared `GET /api/data`; role-protected website, log, allocation and export routes. Public registration is disabled. Individual exports are `GET /api/websites/:id/export/csv|xlsx`; combined exports are `GET /api/export/all/csv|xlsx`. Filtered report export query parameters remain `websiteId`, `category`, `from`, and `to`.
 
 ## Verification
 
@@ -123,3 +123,7 @@ Tests cover bootstrap, Admin/Editor/Viewer API permissions, shared workspace acc
 Integration tests launch an isolated temporary MongoDB and do not connect to your configured application database. They need a MongoDB binary download on first run (cached in `.data/mongodb-binaries`). Run calculation tests without MongoDB via `node --test tests/tracking.test.js`.
 
 JSON backup is an export for safekeeping and external processing; this version does not include in-app restore. Use `mongodump`/`mongorestore` or Atlas snapshots for operational database recovery. Email address verification and background timers are not included.
+
+## Development handover
+
+See [PROJECT_STATUS.md](PROJECT_STATUS.md) for verified results and open configuration work, [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md) for implementation details, [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) for deployment and first-owner setup, and [CHANGELOG.md](CHANGELOG.md) for handover changes. Future coding sessions should follow [AGENTS.md](AGENTS.md).

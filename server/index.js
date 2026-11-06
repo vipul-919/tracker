@@ -12,4 +12,4 @@ try {
   app.get('/{*path}', (_req, res) => res.sendFile(path.join(root, 'dist', 'index.html')));
   const server = app.listen(process.env.PORT || 3001, '127.0.0.1', () => console.log(`Tempo API running at http://127.0.0.1:${process.env.PORT || 3001}`));
   for (const signal of ['SIGINT', 'SIGTERM']) process.on(signal, () => server.close(async () => { await mongoose.disconnect(); process.exit(0); }));
-} catch (err) { console.error('Unable to start Tempo:', err.message, '\nCheck your .env file and make sure MongoDB is running.'); process.exit(1); }
+} catch { console.error('Unable to start Tempo. Check JWT_SECRET, MONGODB_URI and database availability in your server configuration.'); process.exit(1); }
