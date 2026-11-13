@@ -19,7 +19,8 @@ try {
   app.use(express.static(path.resolve('dist')));
   server = await new Promise(resolve => { const s = app.listen(0, '127.0.0.1', () => resolve(s)); });
   browser = await chromium.launch({ executablePath: chrome, headless: true });
-  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 });
+  const ownerContext = await browser.newContext({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 1 });
+  const page = await ownerContext.newPage();
   page.setDefaultTimeout(15000);
   const errors = []; page.on('pageerror', e => errors.push(e.message));
   await page.goto(`http://127.0.0.1:${server.address().port}`);
@@ -38,6 +39,8 @@ try {
   await page.getByLabel('Access role').selectOption('viewer');
   await page.getByRole('button', { name: 'Send invitation', exact: true }).click();
   await page.getByRole('status').filter({ hasText: 'Invitation sent.' }).waitFor();
+  await page.locator('.workspace-directory summary').click();
+  await page.locator('.directory-member').filter({ hasText: 'browser-viewer@example.com' }).getByText(/Invited.*awaiting acceptance/).waitFor();
   const viewerToken = emails.at(-1).text.match(/invitation=([A-Za-z0-9_-]+)/)[1];
   await page.getByLabel('Filter member role').selectOption('viewer');
   await page.getByLabel('Filter invitation status').selectOption('pending');
@@ -202,6 +205,15 @@ try {
   await viewerPage.getByRole('button', { name: 'Accept invitation', exact: true }).click();
   await viewerPage.waitForFunction(id => document.querySelector('[aria-label="Active workspace"]')?.value === id, ownerWorkspaceId);
   await viewerPage.getByRole('heading', { name: 'A clear view of your work.' }).waitFor();
+  await viewerPage.locator('.workspace-directory summary').click();
+  await viewerPage.locator('.directory-member').filter({ hasText: 'browser@example.com' }).waitFor();
+  await viewerPage.locator('.directory-member').filter({ hasText: 'browser-viewer@example.com' }).getByText(/Online/).waitFor();
+  if (!await page.locator('.workspace-directory').evaluate(el => el.open)) await page.locator('.workspace-directory summary').click();
+  await page.locator('.directory-member').filter({ hasText: 'browser-viewer@example.com' }).getByText(/Online/).waitFor();
+  assert.match(await viewerPage.locator('.profile').innerText(), /Browser Viewer/);
+  assert.match(await page.locator('.profile').innerText(), /Alex Morgan/);
+  assert.equal(await page.locator('[aria-label="Active workspace"] option').count(), 1, 'Inviting a member does not grant their personal workspace');
+  await page.screenshot({ path: '.data/screenshots/workspace-member-directory.png', fullPage: true });
   assert.equal(await viewerPage.getByRole('button', { name: 'Workspace Members' }).count(), 0);
   assert.equal(await viewerPage.getByRole('button', { name: 'Settings', exact: true }).count(), 0);
   assert.equal(await viewerPage.getByRole('button', { name: 'Log work', exact: true }).count(), 0);
@@ -243,6 +255,8 @@ try {
   await viewerPage.reload();
   assert.equal(await viewerPage.getByLabel('Active workspace').inputValue(), ownerWorkspaceId);
   await viewerPage.close();
+  await page.locator('.directory-member').filter({ hasText: 'browser-viewer@example.com' }).getByText(/Offline/).waitFor({ timeout: 50000 });
+
 
   const editorPage = await browser.newPage({ viewport: { width: 1280, height: 900 } });
   await editorPage.goto(`http://127.0.0.1:${server.address().port}/`);
@@ -283,8 +297,18 @@ try {
   await page.getByLabel('Active workspace').selectOption(ownerWorkspaceId);
   await page.getByRole('button', { name: 'Workspace Members', exact: true }).waitFor();
   assert.equal(errors.length, 0, errors.join('\n'));
+  const sameAccountTab = await page.context().newPage();
+  await sameAccountTab.goto(`http://127.0.0.1:${server.address().port}/`);
+  await sameAccountTab.getByRole('heading', { name: 'A clear view of your work.' }).waitFor();
+  await sameAccountTab.getByLabel('Active workspace').selectOption(editorPersonalId);
+  await sameAccountTab.waitForFunction(id => document.querySelector('[aria-label="Active workspace"]')?.value === id, editorPersonalId);
+  await page.reload();
+  await page.getByRole('heading', { name: 'A clear view of your work.' }).waitFor();
+  assert.equal(await page.getByLabel('Active workspace').inputValue(), ownerWorkspaceId, 'Reload retains this tab workspace despite selection in another tab');
+  assert.match(await sameAccountTab.locator('.profile').innerText(), /Alex Morgan/);
+  await sameAccountTab.close();
   await editorPage.close();
-  console.log('Browser checks passed: registration, invitations, reciprocal memberships, stale-response isolation, workspace switching, Viewer restrictions, work CRUD, calendar, reports, exports, dashboard, and mobile navigation. Screenshots: .data/screenshots/');
+  console.log('Browser checks passed: two-context member visibility and online/offline presence, identity isolation, registration, invitations, reciprocal memberships, stale-response isolation, workspace switching, Viewer restrictions, work CRUD, calendar, reports, exports, dashboard, and mobile navigation. Screenshots: .data/screenshots/');
 } finally {
   await browser?.close();
   if (server) await new Promise(resolve => server.close(resolve));

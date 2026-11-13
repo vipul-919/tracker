@@ -5,6 +5,7 @@ import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YA
 import { api, download, setActiveWorkspace } from './api';
 import Auth from './Auth';
 import WorkspaceMembers, { InvitationPanel, WorkspaceNameForm } from './WorkspaceMembers';
+import WorkspaceDirectory from './WorkspaceDirectory';
 import { categories, dateKey, duration, monthKey, monthlyStats, reportRows } from '../shared/tracking';
 import './styles.css';
 
@@ -29,6 +30,7 @@ function App() {
       generation.current++; setData({ websites: [], logs: [], allocations: [] }); setModal(null); setPage('Dashboard');
     }
     activeId.current = value.workspaceId; setActiveWorkspace(value.workspaceId); setUser(value);
+    try { sessionStorage.setItem('tempo-workspace', JSON.stringify({ userId: value.id, workspaceId: value.workspaceId })); } catch { /* Storage may be disabled. */ }
     setWorkspaces(previous => previous.map(w => w.id === value.workspaceId ? { ...w, name: value.workspaceName, role: value.role } : w));
   };
   const [data, setData] = useState({ websites: [], logs: [], allocations: [] });
@@ -38,8 +40,8 @@ function App() {
   const [exporting, setExporting] = useState(false), [exportError, setExportError] = useState('');
   const [search, setSearch] = useState('');
   const [year, monthNumber] = month.split('-').map(Number);
-  const canEdit = user?.role === 'owner' || user?.role === 'editor';
-  const isAdmin = Boolean(user?.isPrimaryAdmin);
+  const canEdit = ['owner', 'admin', 'editor'].includes(user?.role);
+  const isAdmin = user?.role === 'owner';
   const navItems = useMemo(() => NAV.filter(([label]) => label !== 'Workspace Members' || isAdmin).filter(([label]) => label !== 'Settings' || isAdmin), [isAdmin]);
   const refresh = async () => {
     const version = generation.current, workspaceId = activeId.current; setLoading(true);
@@ -56,7 +58,19 @@ function App() {
     finally { setSwitching(false); }
   };
   const finishInvitation = async workspaceId => { setInvitationToken(null); window.history.replaceState(null, '', window.location.pathname + window.location.search); await loadWorkspaces(); if (workspaceId) await switchWorkspace(workspaceId); };
-  useEffect(() => { api('/auth/me').then(handleAuth).catch(e => { if (e.status !== 401) setAuthError(e.message); }).finally(() => setBoot(false)); }, []);
+  useEffect(() => {
+    async function restore() {
+      let account = await api('/auth/me');
+      let saved;
+      try { saved = JSON.parse(sessionStorage.getItem('tempo-workspace')); } catch { /* Storage may be disabled. */ }
+      if (!account.mustChangePassword && saved?.userId === account.id && saved.workspaceId !== account.workspaceId) {
+        try { account = await api('/workspaces/' + encodeURIComponent(saved.workspaceId) + '/select', { method: 'POST' }); }
+        catch (e) { if (e.status !== 403 && e.status !== 404) throw e; }
+      }
+      handleAuth(account);
+    }
+    restore().catch(e => { if (e.status !== 401) setAuthError(e.message); }).finally(() => setBoot(false));
+  }, []);
   useEffect(() => { if (user && !user.mustChangePassword) { refresh(); loadWorkspaces().catch(e => setError(e.message)); } }, [user?.id, user?.workspaceId, user?.mustChangePassword]);
   useEffect(() => { document.documentElement.dataset.theme = theme; localStorage.setItem('tempo-theme', theme); }, [theme]);
   useEffect(() => { if (toast) { const timer = setTimeout(() => setToast(''), 4000); return () => clearTimeout(timer); } }, [toast]);
@@ -77,10 +91,14 @@ function App() {
     {sidebar && <div className="sidebar-shade" onClick={() => setSidebar(false)}/>}
     <aside className={`sidebar ${sidebar ? 'is-open' : ''}`}>
       <a className="brand" href="#dashboard" onClick={() => changePage('Dashboard')}><span className="brand-mark">t<span>•</span></span>tempo<span className="brand-dot">®</span></a>
-      <label className="workspace-label workspace-switcher"><span className="workspace-avatar">{user.workspaceName?.[0]?.toUpperCase()}</span><div><small>Active workspace</small><select aria-label="Active workspace" value={user.workspaceId} disabled={busy || exporting || switching} onChange={e => switchWorkspace(e.target.value)}>{(workspaces.length ? workspaces : [{ id: user.workspaceId, name: user.workspaceName, role: user.role }]).map(w => <option key={w.id} value={w.id}>{w.name} ({w.role})</option>)}</select></div></label>
+      <label className="workspace-label workspace-switcher"><span className="workspace-avatar">{user.workspaceName?.[0]?.toUpperCase()}</span><div><small>Active workspace · your access</small><select aria-label="Active workspace" title={user.workspaceName} value={user.workspaceId} disabled={busy || exporting || switching} onChange={e => switchWorkspace(e.target.value)}>{(workspaces.length ? workspaces : [{ id: user.workspaceId, name: user.workspaceName, role: user.role }]).map(w => <option key={w.id} value={w.id}>{w.name} ({w.role})</option>)}</select></div></label>
+      <WorkspaceDirectory key={`${user.id}-${user.workspaceId}`} user={user} onAccessLost={refresh} onSync={(directory, list) => {
+        setWorkspaces(list);
+        setUser(previous => previous?.workspaceId === directory.workspaceId ? { ...previous, workspaceName: directory.workspaceName, role: directory.role, isPrimaryAdmin: directory.role === 'owner' } : previous);
+      }}/>
       <div className="nav-label">WORKSPACE</div>
         <nav>{navItems.map(([label, Icon]) => <button key={label} className={`nav-item ${page === label ? 'active' : ''} ${label === 'Settings' ? 'settings-nav' : ''}`} onClick={() => changePage(label)}><Icon size={18}/><span>{label}</span>{label === 'My Websites' && <span className="nav-count">{data.websites.length}</span>}</button>)}</nav>
-      <div className="sidebar-bottom"><div className="sidebar-note"><span className="note-icon"><Activity size={18}/></span><strong>A little progress, every day.</strong><p>Make time for the work<br/>that makes a difference.</p></div><button className="help-link" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17}/> Help & getting started <ArrowUpRight size={14}/></button><div className="profile"><span className="user-avatar">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small>Personal workspace</small></div><button className="icon-button" title="Sign out" onClick={async () => { try { await api('/auth/logout', { method: 'POST' }); generation.current++; setUser(null); setActiveWorkspace(''); setWorkspaces([]); setData({ websites: [], logs: [], allocations: [] }); } catch(e) { setError(e.message); } }}><LogOut size={16}/></button></div></div>
+      <div className="sidebar-bottom"><div className="sidebar-note"><span className="note-icon"><Activity size={18}/></span><strong>A little progress, every day.</strong><p>Make time for the work<br/>that makes a difference.</p></div><button className="help-link" onClick={() => setModal({ type: 'help' })}><CircleHelp size={17}/> Help & getting started <ArrowUpRight size={14}/></button><div className="profile"><span className="user-avatar">{user.name[0].toUpperCase()}</span><div><strong>{user.name}</strong><small title={user.email}>{user.email}</small></div><button className="icon-button" title="Sign out" onClick={async () => { try { await api('/auth/logout', { method: 'POST' }); generation.current++; setUser(null); setActiveWorkspace(''); setWorkspaces([]); setData({ websites: [], logs: [], allocations: [] }); } catch(e) { setError(e.message); } }}><LogOut size={16}/></button></div></div>
     </aside>
     <div className="main-shell"><header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-menu" aria-label="Open menu" onClick={() => setSidebar(true)}><Menu size={20}/></button><span>Workspace</span><ChevronRight size={13}/><strong>{page}</strong></div><div className="topbar-actions"><span className="local-date">{new Date().toLocaleDateString('en', { weekday: 'short', day: 'numeric', month: 'short', year: 'numeric' })}</span><span className="topbar-divider"/><button className="icon-button" aria-label={`Switch to ${theme === 'light' ? 'dark' : 'light'} mode`} onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>{theme === 'light' ? <Moon size={18}/> : <Sun size={18}/>}</button><span className="mini-avatar">{user.name[0].toUpperCase()}</span></div></header>
     <main key={user.workspaceId} className={canEdit ? '' : 'read-only'}>

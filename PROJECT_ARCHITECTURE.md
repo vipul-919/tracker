@@ -4,7 +4,7 @@
 
 React 19/Vite renders the existing dashboard, website cards, calendar, logs, monthly allocations and reports. `src/main.jsx` keeps page navigation and current workspace state. `src/Auth.jsx` handles self-registration, login and recovery. `src/WorkspaceMembers.jsx` handles invitations, membership management, invitation acceptance and workspace naming. Existing CSS and modal/form components remain in use.
 
-`src/api.js` attaches the active tab's `X-Workspace-Id` to JSON requests and downloads. The switcher persists selection through the server, clears data/modals/filter state, and ignores responses initiated for a previous workspace. Panels remount on workspace changes. Workspace metadata returned with data refreshes the displayed role/name.
+`src/api.js` attaches the active tab's `X-Workspace-Id` to JSON requests and downloads. The switcher persists selection through the server and account-keyed sessionStorage per tab, clears data/modals/filter state, and ignores responses initiated for a previous workspace. Panels remount on workspace changes. Workspace metadata returned with data refreshes the displayed role/name.
 
 `shared/tracking.js` still performs integer-minute calculations and validated string-date filtering. All frontend analytics use only the active workspace dataset. Dashboard excludes inactive/future sites; reports retain inactive/historical projects.
 
@@ -16,7 +16,7 @@ React 19/Vite renders the existing dashboard, website cards, calendar, logs, mon
 | --- | --- |
 | User | Global identity: name, unique normalized email, optional unique username, private bcrypt/session/recovery fields; `lastWorkspaceId`, `workspaceMigrationVersion`. Legacy role/workspaceId/primary flag retained for migration, not permissions. |
 | Workspace | Name, ownerId, timestamps. Personal workspace _id reuses the account _id. Unique ownerId gives each user one personal workspace. |
-| Membership | workspaceId, userId, owner/editor/viewer role, active/inactive status, joinedAt, lastActive. Unique workspaceId + userId. |
+| Membership | workspaceId, userId, owner/admin/editor/viewer role, active/inactive status, joinedAt, lastActive. Unique workspaceId + userId. |
 | WorkspaceInvitation | Name/email, workspaceId, invitedBy, assignedRole, private tokenHash, pending/accepted/rejected/cancelled/expired status, expiresAt, deliveryStatus and acceptedBy. Unique tokenHash; only one pending invitation per workspace/email. |
 | Website | workspaceId, creator userId, name/URL/description, startDate, status and defaultMonthlyHours. |
 | WorkLog | workspaceId, websiteId, creator userId, date, task/category/notes, hours/minutes/totalMinutes. |
@@ -45,7 +45,7 @@ Authenticated middleware loads the identity and version, provisions/upgrades its
 | DELETE /api/workspace-invitations/:id | Owner cancels a pending invitation. |
 | POST /api/invitations/inspect, /accept, /reject | Authenticated recipient email must match and token must be valid/unexpired. Accept consumes pending status conditionally; unique membership prevents duplicate grants. |
 | GET /api/data | Active workspace websites/logs/allocations and role/name metadata. |
-| Existing website/log/allocation CRUD | Owner/Editor writes, all active members read. Project start-date/history checks unchanged. |
+| Existing website/log/allocation CRUD | Owner/Admin/Editor writes, all active members read. Project start-date/history checks unchanged. |
 | Existing individual/combined/filtered CSV and Excel exports | All active members, only selected workspace records. |
 | GET /api/audit-logs, /backup | Selected workspace Owner only. |
 
@@ -57,4 +57,15 @@ Provisioning reuses existing workspace IDs, creates unique memberships, preserve
 
 The bulk migration command defaults to read-only. `--apply` writes an Extended JSON snapshot under `.data/backups` before index/provisioning changes. It never drops collections, removes accounts, copies projects, or overwrites explicit workspace IDs. Repeated runs are tested for idempotency. See DEPLOYMENT_GUIDE.md.
 
-CRUD/audit/cascade writes and invitation consumption/membership creation are separate operations, not cross-collection transactions. A process failure in the small interval after invitation consumption may require the owner to issue a replacement invitation; do not claim full transactional durability. Rate limits are per process; use hosting-wide controls for distributed enforcement. No realtime sync, email-address verification workflow, arbitrary extra-workspace creation, ownership transfer or workspace deletion UI is included. One personal workspace plus invited workspaces matches the requested model.
+CRUD/audit/cascade writes and invitation consumption/membership creation are separate operations, not cross-collection transactions. A process failure in the small interval after invitation consumption may require the owner to issue a replacement invitation; do not claim full transactional durability. Rate limits are per process; use hosting-wide controls for distributed enforcement. No push synchronization of project data, email-address verification workflow, arbitrary extra-workspace creation, ownership transfer or workspace deletion UI is included. One personal workspace plus invited workspaces matches the requested model.
+
+
+## Member directory and presence (November 13, 2026)
+
+The original sidebar selector listed authorized workspaces, not accounts or members. Sharing is directional: accepting an invitation grants the recipient a membership in the inviting workspace; it never grants the inviter access to the recipient's personal workspace or changes login identity. The earlier owner-only management list and refresh-only metadata caused the visibility confusion. The signed-in account email now stays visible below the separate workspace selector and read-only member dropdown.
+
+`src/WorkspaceDirectory.jsx` polls the workspace directory, authorized workspace list and role every 10 seconds, on focus, and immediately after invitation changes. All active members see actual active account names/emails/roles and pending invitations with invited names/emails/roles; invitations cannot be selected to sign into an account. Owner management tables also refresh every 10 seconds. Effects ignore responses after workspace changes/unmount. Network errors clear presence instead of keeping stale green dots.
+
+`POST /api/workspace-presence` accepts a validated random per-tab UUID and active boolean. The server derives workspace, identity and session version from authenticated context. `GET /api/workspace-roster` verifies active membership and returns only directory profile fields, role and online boolean; tokens and session fields are never returned. Both use the validated workspace header. MongoDB WorkspacePresence records are unique by workspace/user/tab with an expiresAt TTL index. Visible tabs heartbeat every 10 seconds; hidden tabs and workspace changes release their own heartbeat. Reads explicitly enforce the 35-second expiry, current account status and session version without waiting for TTL cleanup. Logout and password changes invalidate old presence; other active tabs keep a member online. This is bounded polling, not instantaneous push or proof of keyboard activity. Offline detection can take up to 45 seconds including the observer's next poll.
+
+Workspace Admin is a membership role, never the legacy global account role. Owner/Admin/Editor can write project data; Viewer can read/export. Only Owner manages invitations, members, workspace naming, audit logs and backups. Admin currently has the same project permissions as Editor. Account password changes always apply to the authenticated identity; workspace switching cannot target another account. No migration of existing roles is required.
