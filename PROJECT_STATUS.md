@@ -14,7 +14,7 @@
 
 ## Verification
 
-All 27 Node tests pass and the production build passes. Browser checks pass registration, invitations to existing/new users, reciprocal sharing, membership-specific controls, switching/remembered selection, delayed old-response isolation, Viewer direct API denials, CRUD, calendar, reports, exports, theme and mobile layout. The final run includes legacy accounts missing status/session-version fields and backup-before-apply idempotency.
+All 26 Node tests pass and the production build passes. Browser checks pass registration, invitations to existing/new users, reciprocal sharing, membership-specific controls, switching/remembered selection, delayed old-response isolation, Viewer direct API denials, CRUD, calendar, reports, exports, theme and mobile layout. The final run includes legacy accounts missing status/session-version fields and backup-before-apply idempotency.
 
 All test databases are isolated; no configured application database was reset or populated with test data. The migration preview/apply/backup tests run only against throwaway MongoDB. No lint script exists; lint cannot be reported as passing.
 
@@ -28,32 +28,18 @@ All test databases are isolated; no configured application database was reset or
 ## Known limits
 
 - One personal workspace per account, plus invited workspaces; no UI for arbitrary additional workspaces, ownership transfer or workspace deletion was requested/added.
-- Shared edits appear on refresh; no realtime push synchronization.
+- Member visibility, membership role and presence synchronize with 10-second polling; disconnected presence expires after 35 seconds (up to 45 seconds to appear offline). Shared project edits still appear on refresh; no realtime push synchronization.
 - Multi-document CRUD/audit and invitation-grant sequences do not use MongoDB transactions. Ordinary API failure recovery and concurrent acceptance are tested; hard process-crash recovery may need an owner-issued replacement invitation.
 - Missing legacy ownership references/orphan records require operator review; the migration preserves them rather than guessing or deleting.
 - Global email uniqueness remains the identity invariant. No email verification workflow or in-app backup restore is implemented.
 
 See PROJECT_ARCHITECTURE.md for schemas/API boundaries and DEPLOYMENT_GUIDE.md for the safe rollout plan.
 
-## SMTP delivery follow-up (2026-11-13)
 
-Installed Nodemailer 10.5.0. Invitation/resend responses now explain configuration, authentication, connection and provider rejection failures using fixed messages that do not expose SMTP responses or secrets. SMTP enforces TLS and validates port bounds. Added `npm.cmd run email:verify` for a no-send connection/authentication check and documented provider setup in README.md.
+## Workspace directory update (November 13, 2026)
 
-Verification: all 27 tests, production build and browser checks passed after allowing required sandbox access for Vite and the isolated MongoDB binary download. No lint script exists. The email verification command correctly failed because this checkout has no `.env`, SMTP configuration or APP_URL. Real SMTP credentials, an authorized sender and the reachable application URL must be configured privately in the target environment; restart/redeploy and resend the failed invitation. No production configuration, application records, commits or deployments were changed. Production Atlas, live inbox delivery and deployed migrations remain unverified.
+Root cause: the existing dropdown listed workspaces, not people. Invitation grants are directional, and the owner-only member management screen plus refresh-only workspace metadata provided no shared directory/presence experience. No account impersonation path was found in the reviewed selection flow: JWT identity and active Membership remain server-enforced.
 
+Added a separate read-only member dropdown for all active workspace members, pending invitation visibility, account name/email display, account-keyed per-tab selection restoration, cross-device directory/role refresh and MongoDB-backed expiring per-tab presence. Added membership Admin with project editing; Owner-only management/settings/audits/backups remain enforced. No database reset, production configuration change, commit or deployment was performed.
 
-## Brevo Transactional Email API (2026-11-13)
-
-The existing invitation and password recovery flows now use Brevo when BREVO_API_KEY is set. Existing SMTP remains available when no Brevo key is configured; a Brevo failure never silently falls back to SMTP. No public general-purpose email endpoint was added. Existing authentication, workspace Owner invitation permissions and rate limits remain in place.
-
-Configure BREVO_API_KEY, BREVO_FROM_EMAIL (an active verified Brevo sender), BREVO_FROM_NAME and EMAIL_TEST_TO privately in .env. Keep APP_URL set to the recipient-accessible application URL and configure MONGODB_URI and a real random JWT_SECRET. Never put credentials in frontend variables or tracked example files. Brevo credentials are not SMTP credentials.
-
-Run `npm.cmd run email:verify` to check API authentication and active sender status without sending; run `npm.cmd run email:verify -- --send-test` to send one test email to EMAIL_TEST_TO. Start both servers with `npm.cmd run dev`, or separately use `npm.cmd run dev:server` and `npm.cmd run dev:client`. Use Workspace Members to invite or resend; recipients sign in and accept the invitation. Provider acceptance does not establish inbox delivery. Check Brevo transactional logs and recipient spam folders.
-
-For deployment, set these values in the backend hosting environment and restart/redeploy after changes. Frontend requests remain same-origin through the Vite /api proxy locally and shared Express/Vercel entry points in production. No production settings or database records were changed.
-
-Live verification: Brevo account authentication and active sender checks passed; one test email was accepted by Brevo. Recipient inbox receipt remains unconfirmed. Production Atlas and deployed invitation delivery remain unverified.
-
-Brevo verification checks: all 29 Node tests and the production build passed. Vite required sandbox escalation for parent-directory access. The first browser run timed out waiting for Dashboard after a page reload at scripts/browser-check.js:159; a standalone rerun is being checked. No lint script exists. No commit or deployment was performed.
-
-Standalone browser rerun passed all checks, including registration, invitations, reciprocal memberships, switching, permissions, work CRUD, calendar, reports, exports and mobile navigation. The earlier reload timeout did not recur. Browser/API regression tests use an injected sender and isolated MongoDB; the separate live Brevo test established provider acceptance only.
+The 26-test isolated backend suite passes including directory scope, pending-to-accepted visibility, Admin project access and Owner-only denials, multi-tab presence, expiry without TTL cleanup, logout session invalidation, identity preservation on selection, Viewer downgrade and membership deactivation. Production build passes (Vite needed parent-directory read escalation). No lint script exists. The final browser suite passes with separate Owner/Viewer/Editor browser contexts: pending invite appears immediately, accepted member profile is visible on both sides, online/offline updates after browser closure, identity stays unchanged, Viewer restrictions hold, reciprocal sharing works, late data responses are isolated, and account selection stays per-tab across reloads. Existing CRUD/calendar/reports/exports/theme/mobile checks also pass. Reviewed member dropdown screenshot: .data/screenshots/workspace-member-directory.png. Live devices, production Atlas and SMTP delivery are not verified by these isolated tests.

@@ -56,7 +56,7 @@ const workspaceSchema = new Schema({
 const membershipSchema = new Schema({
   workspaceId: { type: Schema.Types.ObjectId, ref: 'Workspace', required: true, index: true },
   userId: { type: Schema.Types.ObjectId, ref: 'User', required: true, index: true },
-  role: { type: String, enum: ['owner', 'editor', 'viewer'], required: true },
+  role: { type: String, enum: ['owner', 'admin', 'editor', 'viewer'], required: true },
   status: { type: String, enum: ['active', 'inactive'], default: 'active' },
   joinedAt: { type: Date, default: Date.now },
   lastActive: Date,
@@ -67,7 +67,7 @@ const invitationSchema = new Schema({
   name: { type: String, trim: true, maxlength: 100, required: true },
   email: { type: String, lowercase: true, trim: true, required: true },
   invitedBy: { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  assignedRole: { type: String, enum: ['editor', 'viewer'], required: true },
+  assignedRole: { type: String, enum: ['admin', 'editor', 'viewer'], required: true },
   tokenHash: { type: String, required: true, select: false },
   status: { type: String, enum: ['pending', 'accepted', 'rejected', 'cancelled', 'expired'], default: 'pending' },
   expiresAt: { type: Date, required: true },
@@ -79,3 +79,15 @@ invitationSchema.index({ tokenHash: 1 }, { unique: true });
 export const Workspace = mongoose.model('Workspace', workspaceSchema);
 export const Membership = mongoose.model('Membership', membershipSchema);
 export const WorkspaceInvitation = mongoose.model('WorkspaceInvitation', invitationSchema);
+
+// One expiring heartbeat per browser tab. MongoDB makes presence shared by instances.
+const presenceSchema = new Schema({
+  workspaceId: { type: Schema.Types.ObjectId, required: true },
+  userId: { type: Schema.Types.ObjectId, required: true },
+  clientId: { type: String, required: true },
+  sessionVersion: { type: Number, required: true },
+  expiresAt: { type: Date, required: true },
+});
+presenceSchema.index({ workspaceId: 1, userId: 1, clientId: 1 }, { unique: true });
+presenceSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
+export const WorkspacePresence = mongoose.model('WorkspacePresence', presenceSchema);

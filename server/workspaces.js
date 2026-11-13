@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { z } from 'zod';
-import { User, Workspace, Membership, WorkspaceInvitation, Website, WorkLog, MonthlyAllocation, AuditLog } from './models.js';
-import { emailDeliveryError, workspaceInvitationEmail } from './email.js';
+import { User, Workspace, Membership, WorkspaceInvitation, WorkspacePresence, Website, WorkLog, MonthlyAllocation, AuditLog } from './models.js';
+import { workspaceInvitationEmail } from './email.js';
 import { id } from './validation.js';
 
 async function upsert(model, query, values) {
@@ -59,7 +59,7 @@ export function accountPayload(user, context) {
 }
 
 export function installWorkspaceRoutes(app, { sendMail, appUrl, ownerOnly, audit, invitationLimiter }) {
-  const inviteInput = z.object({ name: z.string().trim().min(1).max(100), email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), role: z.enum(['editor', 'viewer']) });
+  const inviteInput = z.object({ name: z.string().trim().min(1).max(100), email: z.string().trim().email().max(254).transform(v => v.toLowerCase()), role: z.enum(['admin', 'editor', 'viewer']) });
   const inviteHash = token => createHash('sha256').update(token).digest('hex');
   const invitationView = invitation => {
     const value = invitation.toJSON(); delete value.tokenHash;
@@ -87,7 +87,32 @@ export function installWorkspaceRoutes(app, { sendMail, appUrl, ownerOnly, audit
     return { ...invitationView(invitation), ...(deliveryError ? { deliveryError } : {}) };
   };
 
+  app.post('/api/workspace-presence', async (req, res) => {
+    const { clientId, active } = z.object({ clientId: z.string().uuid(), active: z.boolean() }).parse(req.body);
+    const query = { workspaceId: req.workspaceId, userId: req.user._id, clientId };
+    if (active) {
+      await upsert(WorkspacePresence, query, { ...query, sessionVersion: req.user.sessionVersion || 0, expiresAt: new Date(Date.now() + 35000) });
+      await WorkspacePresence.updateOne(query, { $set: { sessionVersion: req.user.sessionVersion || 0, expiresAt: new Date(Date.now() + 35000) } });
+    } else await WorkspacePresence.deleteOne(query);
+    res.json({ ok: true });
+  });
+  app.get('/api/workspace-roster', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const [members, invitations, presence] = await Promise.all([
+      Membership.find({ workspaceId: req.workspaceId, status: 'active' }).populate('userId', 'name email status +sessionVersion'),
+      WorkspaceInvitation.find({ workspaceId: req.workspaceId, status: 'pending' }).select('name email assignedRole expiresAt'),
+      WorkspacePresence.find({ workspaceId: req.workspaceId, expiresAt: { $gt: new Date() } }).lean(),
+    ]);
+    res.json({ workspaceId: String(req.workspaceId), workspaceName: req.workspace.name, role: req.membership.role,
+      members: members.filter(m => m.userId && m.userId.status === 'active').map(m => ({
+        id: String(m.userId._id), name: m.userId.name, email: m.userId.email, role: m.role, status: 'active',
+        online: presence.some(p => String(p.userId) === String(m.userId._id) && p.sessionVersion === (m.userId.sessionVersion || 0)),
+      })),
+      invitations: invitations.map(i => ({ id: String(i._id), name: i.name, email: i.email, role: i.assignedRole, status: i.expiresAt <= new Date() ? 'expired' : 'pending', online: false })),
+    });
+  });
   app.get('/api/workspaces', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
     const memberships = await Membership.find({ userId: req.user._id, status: 'active' }).populate('workspaceId');
     res.json(memberships.filter(m => m.workspaceId).map(m => ({ id: String(m.workspaceId._id), name: m.workspaceId.name, role: m.role, personal: String(m.workspaceId.ownerId) === String(req.user._id) })));
   });
@@ -108,7 +133,7 @@ export function installWorkspaceRoutes(app, { sendMail, appUrl, ownerOnly, audit
     res.json({ members: members.filter(m => m.userId).map(m => ({ id: String(m._id), userId: String(m.userId._id), name: m.userId.name, email: m.userId.email, role: m.role, status: m.status, joinedAt: m.joinedAt, lastActive: m.lastActive || m.userId.lastLogin })), invitations: invitations.map(invitationView) });
   });
   app.put('/api/members/:id', ownerOnly, async (req, res) => {
-    const value = z.object({ role: z.enum(['editor', 'viewer']).optional(), status: z.enum(['active', 'inactive']).optional() }).refine(v => Object.keys(v).length > 0).parse(req.body);
+    const value = z.object({ role: z.enum(['admin', 'editor', 'viewer']).optional(), status: z.enum(['active', 'inactive']).optional() }).refine(v => Object.keys(v).length > 0).parse(req.body);
     const member = await Membership.findOne({ _id: id.parse(req.params.id), workspaceId: req.workspaceId });
     if (!member) return res.status(404).json({ error: 'Member not found.' });
     if (member.role === 'owner' || String(member.userId) === String(req.workspace.ownerId)) return res.status(403).json({ error: 'The workspace owner cannot be downgraded or deactivated.' });

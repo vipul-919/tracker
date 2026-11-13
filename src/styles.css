@@ -16,3 +16,22 @@
 .credentials-card{padding:24px;margin-bottom:22px}.credentials-card>p{margin:12px 0}.credentials-card dl{display:grid;grid-template-columns:140px minmax(0,1fr);gap:12px;margin:20px 0;font-size:12px}.credentials-card dd{margin:0;overflow-wrap:anywhere}.credentials-card dt{color:var(--muted)}.credentials-card .button{margin:4px}.invitation-option{flex-direction:row!important;align-items:center}.invitation-option input{width:auto!important}.owner-setup{margin-bottom:20px}
 
 .workspace-switcher{min-width:0}.workspace-switcher>div{min-width:0;flex:1}.workspace-switcher select{width:100%;min-width:0;font-size:11px;padding:6px 2px;border:0;background:transparent;overflow:hidden;text-overflow:ellipsis}.workspace-switcher small{display:block}.invitation-form{margin:20px 0;max-width:520px}.invitation-panel{margin-bottom:20px}.workspace-name-form{padding:16px 0}.role-owner{background:var(--soft);color:var(--green)}.user-notice{margin-bottom:16px}
+/* Workspace access and people are distinct: member rows cannot switch identity. */
+.sidebar { overflow-y: auto; }
+.workspace-switcher, .workspace-directory { flex-shrink: 0; }
+.workspace-switcher > div { min-width: 0; flex: 1; }
+.workspace-switcher select { width: 100%; min-width: 0; text-overflow: ellipsis; }
+.workspace-directory { margin: 0 3px 16px; border: 1px solid var(--border, #dce2d5); border-radius: 10px; font-size: 12px; }
+.workspace-directory summary { cursor: pointer; padding: 12px; font-weight: 600; }
+.workspace-directory summary span { float: right; }
+.workspace-directory-list { padding: 0 10px 10px; max-height: 240px; overflow: auto; }
+.workspace-directory-list > p { font-size: 11px; line-height: 1.5; }
+.directory-member { display: flex; align-items: center; gap: 9px; padding: 10px 0; border-bottom: 1px solid var(--border, #dce2d5); }
+.directory-avatar { position: relative; display: grid; place-items: center; width: 30px; height: 30px; flex-shrink: 0; border-radius: 50%; background: #e1e7db; color: #426343; }
+.presence-dot { position: absolute; bottom: -1px; right: -1px; width: 9px; height: 9px; border-radius: 50%; background: #858a80; border: 2px solid var(--surface); }
+.presence-dot.online { background: #169c5b; }
+.directory-details { min-width: 0; }
+.directory-details strong, .directory-details small { display: block; overflow-wrap: anywhere; line-height: 1.5; }
+.directory-details small { font-size: 10px; opacity: .8; }
+.profile > div { min-width: 0; }
+.profile small { overflow: hidden; text-overflow: ellipsis; }

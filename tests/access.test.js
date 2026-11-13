@@ -1,13 +1,13 @@
 ﻿import { before, after, test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import bcrypt from 'bcryptjs';
 import mongoose from 'mongoose';
 import request from 'supertest';
 import { MongoMemoryServer } from 'mongodb-memory-server';
 import { createApp } from '../server/app.js';
 import { ensurePersonalWorkspace } from '../server/workspaces.js';
-import { User, Workspace, Membership, WorkspaceInvitation, Website, WorkLog, MonthlyAllocation, AuditLog } from '../server/models.js';
+import { User, Workspace, Membership, WorkspaceInvitation, WorkspacePresence, Website, WorkLog, MonthlyAllocation, AuditLog } from '../server/models.js';
 
 let mongo, app, people, messages = [], failMail = false;
 const secret = 'collaboration-integration-secret-at-least-32-characters';
@@ -252,4 +252,61 @@ test('pre-role legacy identities retain recovery expiry and logout invalidation 
   const cookie = login.headers['set-cookie'][0].split(';')[0];
   await agent.post('/api/auth/logout').set(...headers).expect(200);
   await request(app).get('/api/data').set('Cookie', cookie).expect(401);
+});
+
+
+test('shared directory, tab presence, session invalidation and Admin permissions stay workspace scoped', async () => {
+  const register = async name => {
+    const agent = request.agent(app), email = `${name.toLowerCase()}@directory.example.test`;
+    const response = await agent.post('/api/auth/register').set(...headers).send({ name, email, password }).expect(200);
+    return { ...response.body, agent, email, name };
+  };
+  const owner = await register('DirectoryOwner'), member = await register('DirectoryMember');
+  const shared = owner.workspaceId;
+  const { token } = await invite(owner, member, 'admin');
+  let roster = (await owner.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared).expect(200)).body;
+  assert.equal(roster.invitations[0].name, member.name);
+  assert.equal(roster.invitations[0].status, 'pending');
+  assert.equal(roster.invitations[0].tokenHash, undefined);
+  await member.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared).expect(403);
+  await post(member, '/api/invitations/accept', { token }).expect(200);
+  const firstTab = randomUUID(), secondTab = randomUUID();
+  await post(member, '/api/workspace-presence', { clientId: firstTab, active: true, userId: owner.id }, shared).expect(200);
+  await post(member, '/api/workspace-presence', { clientId: secondTab, active: true }, shared).expect(200);
+  for (const person of [owner, member]) {
+    roster = (await person.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared).expect(200)).body;
+    assert.deepEqual(new Set(roster.members.map(m => m.email)), new Set([owner.email, member.email]));
+    assert.equal(roster.invitations.length, 0);
+    assert.equal(roster.members.find(m => m.id === member.id).online, true);
+    assert.equal(roster.members.find(m => m.id === owner.id).online, false);
+    assert.equal(roster.members[0].sessionVersion, undefined);
+  }
+  await post(member, '/api/workspace-presence', { clientId: firstTab, active: false }, shared).expect(200);
+  roster = (await owner.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared)).body;
+  assert.equal(roster.members.find(m => m.id === member.id).online, true, 'Another active tab keeps member online');
+  await WorkspacePresence.updateMany({ userId: member.id }, { $set: { expiresAt: new Date(Date.now() - 1000) } });
+  roster = (await owner.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared)).body;
+  assert.equal(roster.members.find(m => m.id === member.id).online, false, 'Expiry is checked without waiting for TTL deletion');
+  await post(member, '/api/workspace-presence', { clientId: secondTab, active: true }, shared).expect(200);
+  await post(member, '/api/websites', siteInput('Admin project'), shared).expect(201);
+  for (const path of ['/api/members', '/api/audit-logs', '/api/backup']) await member.agent.get(path).set('X-Workspace-Id', shared).expect(403);
+  await member.agent.put('/api/workspaces/current').set(...headers).set('X-Workspace-Id', shared).send({ name: 'Denied' }).expect(403);
+  await post(member, '/api/workspace-invitations', { name: 'Denied', email: 'denied@example.test', role: 'owner' }, shared).expect(403);
+  await post(owner, `/api/workspaces/${member.workspaceId}/select`, {}).expect(403);
+  await owner.agent.get('/api/workspace-roster').set('X-Workspace-Id', member.workspaceId).expect(403);
+  const selected = (await post(member, `/api/workspaces/${shared}/select`, {}).expect(200)).body;
+  assert.equal(selected.id, member.id); assert.equal(selected.email, member.email); assert.equal(selected.role, 'admin');
+  await post(member, '/api/auth/logout', {}).expect(200);
+  roster = (await owner.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared)).body;
+  assert.equal(roster.members.find(m => m.id === member.id).online, false, 'Revoked sessions cannot remain online');
+  await member.agent.post('/api/auth/login').set(...headers).send({ email: member.email, password }).expect(200);
+  await post(member, '/api/workspace-presence', { clientId: secondTab, active: true }, shared).expect(200);
+  const membership = await Membership.findOne({ workspaceId: shared, userId: member.id });
+  await owner.agent.put(`/api/members/${membership.id}`).set(...headers).set('X-Workspace-Id', shared).send({ role: 'viewer' }).expect(200);
+  await post(member, '/api/websites', siteInput('Denied after downgrade'), shared).expect(403);
+  await owner.agent.put(`/api/members/${membership.id}`).set(...headers).set('X-Workspace-Id', shared).send({ status: 'inactive' }).expect(200);
+  await post(member, '/api/workspace-presence', { clientId: secondTab, active: true }, shared).expect(403);
+  await member.agent.get('/api/workspace-roster').set('X-Workspace-Id', shared).expect(403);
+  assert.equal((await member.agent.get('/api/workspaces').expect(200)).body.some(w => w.id === shared), false);
+  await member.agent.get('/api/workspace-roster').set('X-Workspace-Id', member.workspaceId).expect(200);
 });
