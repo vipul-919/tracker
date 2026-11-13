@@ -12,7 +12,7 @@ export default function WorkspaceMembers() {
   useEffect(() => { load().catch(e => setError(e.message)); }, []);
   async function action(path, method, body, success) {
     setBusy(true); setError('');
-    try { const result = await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) }); await load(); setNotice(success || (result.deliveryStatus === 'sent' ? 'Invitation sent. The recipient must accept it to join.' : 'Invitation saved, but email delivery failed. Configure SMTP and APP_URL, then resend.')); setInvite(false); setConfirm(null); }
+    try { const result = await api(path, { method, ...(body ? { body: JSON.stringify(body) } : {}) }); await load(); setNotice(success || (result.deliveryStatus === 'sent' ? 'Invitation sent. The recipient must accept it to join.' : `Invitation saved, but email delivery failed. ${result.deliveryError || 'Ask the server administrator to verify email configuration and APP_URL, then resend.'}`)); setInvite(false); setConfirm(null); }
     catch (e) { setError(e.message); } finally { setBusy(false); }
   }
   const rows = [...data.members.map(m => ({ ...m, kind: 'member' })), ...data.invitations.map(i => ({ ...i, role: i.assignedRole, kind: 'invitation' }))].filter(r => (!role || r.role === role) && (!status || r.status === status) && `${r.name} ${r.email}`.toLowerCase().includes(query.toLowerCase()));

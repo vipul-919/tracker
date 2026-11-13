@@ -58,3 +58,20 @@ Provisioning reuses existing workspace IDs, creates unique memberships, preserve
 The bulk migration command defaults to read-only. `--apply` writes an Extended JSON snapshot under `.data/backups` before index/provisioning changes. It never drops collections, removes accounts, copies projects, or overwrites explicit workspace IDs. Repeated runs are tested for idempotency. See DEPLOYMENT_GUIDE.md.
 
 CRUD/audit/cascade writes and invitation consumption/membership creation are separate operations, not cross-collection transactions. A process failure in the small interval after invitation consumption may require the owner to issue a replacement invitation; do not claim full transactional durability. Rate limits are per process; use hosting-wide controls for distributed enforcement. No realtime sync, email-address verification workflow, arbitrary extra-workspace creation, ownership transfer or workspace deletion UI is included. One personal workspace plus invited workspaces matches the requested model.
+
+## SMTP diagnostics
+
+`server/email.js` shares a validated TLS transport between sending and `scripts/verify-email.js`. The CLI verifies connection/authentication without sending mail. Invitation send/resend responses include a transient, fixed `deliveryError` on failure for the Owner UI; raw provider errors and tokens are never returned or persisted. Failed sends retain failed delivery status and grant no membership. Port 465 uses implicit TLS; other ports require STARTTLS. Credentials and APP_URL remain server-only configuration.
+
+
+## Brevo Transactional Email API (2026-11-13)
+
+The existing invitation and password recovery flows now use Brevo when BREVO_API_KEY is set. Existing SMTP remains available when no Brevo key is configured; a Brevo failure never silently falls back to SMTP. No public general-purpose email endpoint was added. Existing authentication, workspace Owner invitation permissions and rate limits remain in place.
+
+Configure BREVO_API_KEY, BREVO_FROM_EMAIL (an active verified Brevo sender), BREVO_FROM_NAME and EMAIL_TEST_TO privately in .env. Keep APP_URL set to the recipient-accessible application URL and configure MONGODB_URI and a real random JWT_SECRET. Never put credentials in frontend variables or tracked example files. Brevo credentials are not SMTP credentials.
+
+Run `npm.cmd run email:verify` to check API authentication and active sender status without sending; run `npm.cmd run email:verify -- --send-test` to send one test email to EMAIL_TEST_TO. Start both servers with `npm.cmd run dev`, or separately use `npm.cmd run dev:server` and `npm.cmd run dev:client`. Use Workspace Members to invite or resend; recipients sign in and accept the invitation. Provider acceptance does not establish inbox delivery. Check Brevo transactional logs and recipient spam folders.
+
+For deployment, set these values in the backend hosting environment and restart/redeploy after changes. Frontend requests remain same-origin through the Vite /api proxy locally and shared Express/Vercel entry points in production. No production settings or database records were changed.
+
+Live verification: Brevo account authentication and active sender checks passed; one test email was accepted by Brevo. Recipient inbox receipt remains unconfirmed. Production Atlas and deployed invitation delivery remain unverified.
