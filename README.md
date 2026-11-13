@@ -44,6 +44,24 @@ Open http://127.0.0.1:5173. Create an account to receive your personal workspace
 
 `ADMIN_BOOTSTRAP_TOKEN` is obsolete. Existing env values are preserved by setup; it no longer generates a bootstrap token. Never expose credentials or prefix them with VITE_.
 
+## Email setup and troubleshooting
+
+Nodemailer is included. Configure these server-only values privately in `.env` (or in your deployment environment):
+
+```dotenv
+SMTP_HOST=smtp.your-provider.example
+SMTP_PORT=587
+SMTP_USER=your-smtp-username
+SMTP_PASSWORD=your-provider-smtp-password
+SMTP_FROM_EMAIL=verified-sender@your-domain.example
+SMTP_FROM_NAME=Tempo
+APP_URL=https://your-tempo-domain.example
+```
+
+Use your provider's actual host and credentials, and an authorized sender. Port 587 requires STARTTLS; port 465 uses TLS immediately. If your provider requires an app password or SMTP-specific credential, use that credential. Never put secrets in VITE_ variables or source control. For local development APP_URL can be `http://127.0.0.1:5173`; remote recipients need a reachable deployed URL.
+
+Run `npm.cmd run email:verify` to check configuration, connectivity, TLS and authentication without sending email. This does not establish sender authorization or inbox delivery. Restart the local server after changing `.env`; deployed environment changes require a new deployment. Then use **Resend invitation** on the failed row. Check provider delivery logs and spam folders if SMTP accepts mail but it does not arrive. Invitations remain pending until the recipient accepts.
+
 ## Verification and build
 
 ```powershell
@@ -62,3 +80,17 @@ See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md), [PROJECT_STATUS.md](PROJ
 
 
 Test case 
+
+## Brevo Transactional Email API (2026-11-13)
+
+The existing invitation and password recovery flows now use Brevo when BREVO_API_KEY is set. Existing SMTP remains available when no Brevo key is configured; a Brevo failure never silently falls back to SMTP. No public general-purpose email endpoint was added. Existing authentication, workspace Owner invitation permissions and rate limits remain in place.
+
+Configure BREVO_API_KEY, BREVO_FROM_EMAIL (an active verified Brevo sender), BREVO_FROM_NAME and EMAIL_TEST_TO privately in .env. Keep APP_URL set to the recipient-accessible application URL and configure MONGODB_URI and a real random JWT_SECRET. Never put credentials in frontend variables or tracked example files. Brevo credentials are not SMTP credentials.
+
+Run `npm.cmd run email:verify` to check API authentication and active sender status without sending; run `npm.cmd run email:verify -- --send-test` to send one test email to EMAIL_TEST_TO. Start both servers with `npm.cmd run dev`, or separately use `npm.cmd run dev:server` and `npm.cmd run dev:client`. Use Workspace Members to invite or resend; recipients sign in and accept the invitation. Provider acceptance does not establish inbox delivery. Check Brevo transactional logs and recipient spam folders.
+
+For deployment, set these values in the backend hosting environment and restart/redeploy after changes. Frontend requests remain same-origin through the Vite /api proxy locally and shared Express/Vercel entry points in production. No production settings or database records were changed.
+
+Live verification: Brevo account authentication and active sender checks passed; one test email was accepted by Brevo. Recipient inbox receipt remains unconfirmed. Production Atlas and deployed invitation delivery remain unverified.
+
+A placeholder-only Brevo configuration template is available in `.env.brevo.example`. The existing `.env.example` was already absent when this integration was implemented.

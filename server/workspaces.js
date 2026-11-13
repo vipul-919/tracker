@@ -72,17 +72,19 @@ export function installWorkspaceRoutes(app, { sendMail, appUrl, ownerOnly, audit
     invitation.expiresAt = new Date(Date.now() + 7 * 86400000);
     invitation.deliveryStatus = 'sending';
     await invitation.save();
+    let deliveryError;
     try {
-      if (!/^https?:\/\//.test(appUrl)) throw new Error('APP_URL is required');
+      if (!/^https?:\/\//.test(appUrl)) throw Object.assign(new Error('APP_URL is required'), { code: 'EAPPURL' });
       const url = new URL(appUrl); url.hash = `invitation=${token}`;
       await sendMail({ to: invitation.email, ...workspaceInvitationEmail({ workspaceName: req.workspace.name, inviterName: req.user.name, role: invitation.assignedRole, url: url.toString() }) });
       await WorkspaceInvitation.updateOne({ _id: invitation._id, tokenHash: invitation.tokenHash }, { $set: { deliveryStatus: 'sent' } });
       invitation.deliveryStatus = 'sent';
-    } catch {
+    } catch (error) {
+      deliveryError = error.code === 'EAPPURL' ? 'Set APP_URL to the application URL before sending invitations.' : emailDeliveryError(error);
       await WorkspaceInvitation.updateOne({ _id: invitation._id, tokenHash: invitation.tokenHash }, { $set: { deliveryStatus: 'failed' } });
       invitation.deliveryStatus = 'failed';
     }
-    return invitationView(invitation);
+    return { ...invitationView(invitation), ...(deliveryError ? { deliveryError } : {}) };
   };
 
   app.post('/api/workspace-presence', async (req, res) => {
