@@ -20,6 +20,7 @@
     "test": "node --test tests/*.test.js",
     "db": "node scripts/local-db.js",
     "setup": "node scripts/setup.js",
+    "email:verify": "node --env-file-if-exists=.env scripts/verify-email.js",
     "test:browser": "node scripts/browser-check.js"
   },
   "overrides": {
@@ -38,7 +39,7 @@
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.468.0",
     "mongoose": "^8.19.1",
-    "nodemailer": "^10.3.1",
+    "nodemailer": "^10.5.0",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
     "recharts": "^3.2.1",

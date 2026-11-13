@@ -137,7 +137,7 @@ export function createApp({ secret, production = false, sendMail = sendConfigure
     try { await sendMail({ to: user.email, ...recoveryEmail({ name: user.name, code }) }); }
     catch {
       await User.updateOne({ _id: user._id, resetCodeHash: user.resetCodeHash }, { $unset: { resetCodeHash: 1, resetCodeExpiry: 1 } });
-      console.error('Password recovery email delivery failed. Check SMTP configuration.');
+      console.error('Password recovery email delivery failed. Check email provider configuration.');
     }
     return res.json(generic);
   });
@@ -159,7 +159,7 @@ export function createApp({ secret, production = false, sendMail = sendConfigure
       $unset: { resetCodeHash: 1, resetCodeExpiry: 1, resetRequestWindowStart: 1 },
     });
     if (!changed) return invalidReset(res);
-    sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(() => console.error('Password confirmation email delivery failed. Check SMTP configuration.'));
+    sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(() => console.error('Password confirmation email delivery failed. Check email provider configuration.'));
     return res.json({ message: 'Password updated. Sign in with your new password.' });
   });
   app.use('/api', async (req, res, next) => {
@@ -189,7 +189,7 @@ export function createApp({ secret, production = false, sendMail = sendConfigure
     user.resetCodeHash = undefined;
     user.resetCodeExpiry = undefined;
     await user.save();
-    sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(error => console.error('Password confirmation email delivery failed:', error.message));
+    sendMail({ to: user.email, ...passwordChangedEmail({ name: user.name }) }).catch(() => console.error('Password confirmation email delivery failed. Check email provider configuration.'));
     return signIn(res, user);
   });
   app.post('/api/auth/claim-owner', (_req, res) => res.status(410).json({ error: 'Your personal workspace already has you as its owner.' }));
