@@ -57,3 +57,8 @@ Tests use isolated temporary MongoDB, not your configured database. First use ma
 For a local built app, run `npm.cmd start` after building and open http://127.0.0.1:3001. Vercel serves dist plus the existing API function; do not use npm start or the local database helper as Vercel build commands.
 
 See [PROJECT_ARCHITECTURE.md](PROJECT_ARCHITECTURE.md), [PROJECT_STATUS.md](PROJECT_STATUS.md), [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md), [CHANGELOG.md](CHANGELOG.md), and [AGENTS.md](AGENTS.md). Existing-data migration defaults to preview and provides backup-before-apply; do not reset your database to upgrade.
+
+
+
+
+Test case 
